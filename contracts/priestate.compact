@@ -1,0 +1,18 @@
+pragma language_version >= 0.23;
+
+import CompactStandardLibrary;
+
+export sealed ledger eligibilityThreshold: Uint<64>;
+
+export ledger eligibilityResult: Boolean;
+
+witness propertyValue(): Uint<64>;
+
+export circuit checkEligibility(): [] {
+  const value = propertyValue();
+  eligibilityResult = disclose(value >= eligibilityThreshold);
+}
+
+constructor(threshold: Uint<64>) {
+  eligibilityThreshold = disclose(threshold);
+}

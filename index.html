@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="PRIESTATE — Prove eligibility without revealing your data. Privacy-first zero-knowledge proofs on Midnight." />
+    <meta name="theme-color" content="#0a0a14" />
+    <meta http-equiv="X-Content-Type-Options" content="nosniff" />
+    <meta http-equiv="X-Frame-Options" content="DENY" />
+    <meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin" />
+    <meta http-equiv="Content-Security-Policy" content="
+      default-src 'self';
+      script-src 'self' 'wasm-unsafe-eval' blob:;
+      style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+      font-src 'self' https://fonts.gstatic.com;
+      img-src 'self' data:;
+      connect-src 'self' https://indexer.preprod.midnight.network https://indexer.preview.midnight.network wss://indexer.preprod.midnight.network wss://indexer.preview.midnight.network https://rpc.preprod.midnight.network https://rpc.preview.midnight.network https://midnight-tmnight-preprod.nethermind.dev https://midnight-tmnight-preview.nethermind.dev http://127.0.0.1:6300 http://127.0.0.1:8088 ws://127.0.0.1:8088 ws://127.0.0.1:9944;
+      worker-src 'self' blob:;
+      frame-ancestors 'none';
+      base-uri 'self';
+      form-action 'self';
+    " />
+    <meta http-equiv="Permissions-Policy" content="accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=(), interest-cohort=()" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <title>PRIESTATE — Zero-Knowledge Privacy on Midnight</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

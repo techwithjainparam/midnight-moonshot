@@ -1,0 +1,31 @@
+# Local Midnight proof server for PRIESTATE deployment (preview/preprod).
+# LOCAL ONLY — do not expose port 6300 to a public network: the proof server
+# receives the transaction private data (including witnesses) to build proofs.
+# Stop with: docker compose down
+
+name: midnight-moonshot-proof-server
+
+services:
+  proof-server:
+    # Pinned to 8.1.0 (matches the ledger-v8 8.1.0 that Midnight.js 4.1.1
+    # pins client-side). Never bump downward into the 7.x line: proof-server
+    # 7.x hangs in proof generation on Apple Silicon Macs (actix worker spins
+    # at 100% CPU forever after /prove, no log output). Avoid 9.0.0-rc.x tags:
+    # pre-release.
+    image: midnightntwrk/proof-server:8.1.0
+    container_name: midnight-moonshot-proof-server
+    command: ["midnight-proof-server -v"]
+    ports:
+      - "6300:6300"
+    environment:
+      RUST_BACKTRACE: "full"
+    healthcheck:
+      # The image is distroless (nix-built): /bin/sh exists but is not on
+      # PATH and there is no curl/wget. CMD-SHELL invokes /bin/sh directly and
+      # the probe uses the shell-builtin /dev/tcp redirect, so `docker compose
+      # up -d --wait` gates on the proof-server actually listening.
+      test: ["CMD-SHELL", "echo > /dev/tcp/127.0.0.1/6300"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 10s

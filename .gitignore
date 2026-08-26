@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+
+# Generated contract artifacts (regenerated with `npm run compile`)
+contracts/managed/
+
+# Local runtime state and secrets
+.midnight-state.json
+.midnight-state.json.backup
+.midnight-state.json.tmp-*
+.midnight-wallet-state/
+midnight-level-db/
+*.log
+
+# Wallet seeds, mnemonics, and environment secrets — never commit these
+.env
+.env.*
+!.env.example
+*.seed
+*.mnemonic
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Vite cache
+.vite/

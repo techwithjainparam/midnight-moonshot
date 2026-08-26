@@ -1,0 +1,80 @@
+{
+  "name": "midnight-moonshot",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "PRIESTATE - a privacy-first property eligibility proof built on Midnight. Frontend foundation (Vite + React + TypeScript) with the Compact contract and managed artifacts.",
+  "author": "",
+  "license": "MIT",
+  "scripts": {
+    "compile": "compact compile contracts/priestate.compact contracts/managed/priestate",
+    "copy-circuits": "tsx scripts/copy-circuit-files.ts",
+    "predev": "npm run compile && npm run copy-circuits",
+    "dev": "vite",
+    "verify-server": "tsx server/index.ts",
+    "prebuild": "npm run compile && npm run copy-circuits",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "clean": "rm -rf contracts/managed dist public/keys public/zkir .midnight-state.json .midnight-wallet-state midnight-level-db",
+    "setup": "npx tsx src/setup.ts",
+    "deploy": "npx tsx src/deploy.ts",
+    "network": "npx tsx src/network.ts",
+    "check-balance": "npx tsx src/check-balance.ts",
+    "proof-server:start": "docker compose up -d --wait",
+    "proof-server:stop": "docker compose down"
+  },
+  "dependencies": {
+    "@midnight-ntwrk/compact-runtime": "0.16.0",
+    "@midnight-ntwrk/dapp-connector-api": "^4.0.1",
+    "@midnight-ntwrk/midnight-js-contracts": "4.1.1",
+    "@midnight-ntwrk/midnight-js-fetch-zk-config-provider": "^4.1.1",
+    "@midnight-ntwrk/midnight-js-http-client-proof-provider": "4.1.1",
+    "@midnight-ntwrk/midnight-js-indexer-public-data-provider": "4.1.1",
+    "@midnight-ntwrk/midnight-js-level-private-state-provider": "4.1.1",
+    "@midnight-ntwrk/midnight-js-network-id": "4.1.1",
+    "@midnight-ntwrk/midnight-js-node-zk-config-provider": "4.1.1",
+    "@midnight-ntwrk/midnight-js-protocol": "4.1.1",
+    "@midnight-ntwrk/midnight-js-types": "4.1.1",
+    "@midnight-ntwrk/midnight-js-utils": "4.1.1",
+    "@midnight-ntwrk/wallet-sdk": "1.2.0",
+    "@scure/base": "^2.3.0",
+    "@scure/bip39": "2.2.0",
+    "buffer": "^6.0.3",
+    "nodemailer": "^9.0.5",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^7.18.2",
+    "rxjs": "^7.8.2",
+    "semver": "^7.8.5",
+    "vite-plugin-top-level-await": "^1.6.0",
+    "vite-plugin-wasm": "^3.6.0",
+    "ws": "^8.21.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/nodemailer": "^8.0.1",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@types/semver": "^7.8.0",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^6.0.0",
+    "rollup": "^4.62.4",
+    "tsx": "^4.23.0",
+    "typescript": "~6.0.3",
+    "vite": "^8.2.0"
+  },
+  "overrides": {
+    "@midnight-ntwrk/onchain-runtime-v3": "3.0.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "keywords": [
+    "midnight",
+    "blockchain",
+    "zero-knowledge",
+    "privacy",
+    "priestate"
+  ]
+}
