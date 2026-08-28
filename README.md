@@ -22,10 +22,14 @@ Only the eligibility result is disclosed publicly on the ledger. The property va
 | Compact PRIESTATE contract | Done |
 | Midnight SDK dependencies | Done |
 | Contract compilation + managed artifacts | Done |
-| Basic test setup | Done |
-| Lace wallet UI | Not started (later level) |
-| Circuit frontend integration | Not started (later level) |
-| Preprod deployment | Not started (later level) |
+| Test suite (88 tests) | Done |
+| Wallet connection (DApp Connector v4.x) | Done |
+| Circuit frontend integration (ZK proof flow) | Done |
+| Contact verification (Email OTP + Aadhaar KYC) | Done |
+| Preprod deployment script | Done |
+| Browser ZK config (FetchZkConfigProvider) | Done |
+| On-chain result capture & display | Done |
+| Production build | Done |
 
 ## Smart Contract
 
@@ -36,25 +40,40 @@ pragma language_version >= 0.23;
 
 import CompactStandardLibrary;
 
-export sealed ledger eligibilityThreshold: Uint<64>;
+export enum RegistrationStatus { PENDING, APPROVED, REJECTED }
 
+export struct Registration {
+  owner: Bytes<32>,          // owner/applicant binding (DApp public key)
+  area: Uint<64>,            // public property area
+  status: RegistrationStatus,
+  district: Bytes<32>,       // registry metadata
+  submittedAt: Uint<64>,     // registry metadata
+  reviewedBy: Bytes<32>,     // officer DApp public key
+  reviewedAt: Uint<64>,      // review timestamp
+}
+
+export sealed ledger eligibilityThreshold: Uint<64>;
+export sealed ledger officer: Bytes<32>;             // designated officer DApp public key
+
+export ledger registrationCounter: Counter;
+export ledger registrations: Map<Uint<64>, Registration>;
 export ledger eligibilityResult: Boolean;
 
-witness propertyValue(): Uint<64>;
+witness propertyValue(): Uint<64>;           // private: property VALUE
+witness applicantSecretKey(): Bytes<32>;     // private: derives owner binding
+witness officerSecretKey(): Bytes<32>;       // private: authorizes review
 
-export circuit checkEligibility(): [] {
-  const value = propertyValue();
-  eligibilityResult = disclose(value >= eligibilityThreshold);
-}
-
-constructor(threshold: Uint<64>) {
-  eligibilityThreshold = disclose(threshold);
-}
+export circuit submitRegistration(...);
+export circuit approveRegistration(...);      // designated officer only
+export circuit rejectRegistration(...);       // designated officer only
+export circuit checkEligibility(): [];        // existing eligibility circuit
 ```
 
-* The eligibility **threshold** is a public, sealed ledger field set once at deployment.
-* `propertyValue` is a **witness** — supplied privately by the DApp, never published.
-* `checkEligibility` computes `propertyValue >= eligibilityThreshold` inside the circuit and **discloses only the Boolean result** to the `eligibilityResult` ledger field.
+* **Public ledger metadata**: eligibility threshold, designated officer, registration counter, the registry map (owner binding, area, status, district, timestamps, reviewer), and the Boolean eligibility result.
+* **Private witnesses**: the property **VALUE** (`propertyValue`), plus the applicant and officer secret keys — never published. Only derived DApp public keys are disclosed where a binding or authorization must be recorded.
+* **eligibility threshold** and the **designated officer** are sealed once at deployment (`constructor(threshold, designatedOfficer)`).
+* `checkEligibility` computes `propertyValue >= eligibilityThreshold` inside the circuit and discloses only the Boolean result to `eligibilityResult`.
+* Officer authorization: `approveRegistration`/`rejectRegistration` re-derive the caller's DApp public key from `officerSecretKey` and `assert` it equals the sealed `officer` public key.
 
 ## Project Structure
 
@@ -63,15 +82,36 @@ midnight-moonshot/
 ├── contracts/
 │   ├── priestate.compact          # Compact smart contract source
 │   └── managed/priestate/         # generated artifacts (gitignored)
+│       ├── contract/              # generated contract API
+│       ├── keys/                  # proving/verifying keys
+│       └── zkir/                  # compiled circuit (zkir + bzkir)
 ├── server/                        # PRIESTATE verification API (email OTP + Aadhaar KYC)
-├── src/                           # Vite + React frontend foundation
-├── tests/
-│   ├── compile.test.ts            # toolchain + compile + artifacts + contract-info
-│   └── contract-api.test.ts       # generated contract API smoke tests
+├── src/
+│   ├── auth/                      # auth context + role model
+│   ├── components/                # React components (guards, navbar, etc.)
+│   ├── contract/                  # CompiledPriestateContract + witnesses
+│   ├── data/                      # mock properties + on-chain result storage
+│   ├── documents/                 # document upload + extraction
+│   ├── pages/                     # page components (Landing, Verify, Result, etc.)
+│   ├── profile/                   # contact verification providers
+│   ├── dapp-wallet.ts             # DApp Connector wallet integration
+│   ├── priestate-api.ts           # PriestateAPI (deploy/join + lifecycle)
+│   ├── browser-manager.ts         # BrowserPriestateManager
+│   ├── contract-address.ts        # contract address resolution
+│   └── in-memory-private-state-provider.ts
+├── tests/                         # 88 tests (compile, wiring, result, privacy, etc.)
+├── public/
+│   ├── keys/                      # ZK artifacts (copied by copy-circuits)
+│   └── zkir/
+├── scripts/
+│   └── copy-circuit-files.ts      # copies ZK artifacts to public/
+├── .midnight-state.json           # wallet seed + deployment records (gitignored)
+├── .midnight-wallet-state/        # wallet sync cache (gitignored)
 ├── index.html
 ├── package.json
 ├── tsconfig.json
-└── vite.config.ts
+├── vite.config.ts
+└── docker-compose.yml             # proof server container
 ```
 
 ## Commands
@@ -79,11 +119,18 @@ midnight-moonshot/
 ```bash
 npm install          # install dependencies
 npm run compile      # compact compile contracts/priestate.compact contracts/managed/priestate
+npm run copy-circuits# copy ZK artifacts to public/ for browser fetch
 npm run test         # run the test suite (tsx --test)
 npm run typecheck    # tsc --noEmit
-npm run dev          # start the Vite dev server
+npm run dev          # start the Vite dev server (port 3000)
 npm run verify-server# start the verification API (email OTP / Aadhaar KYC)
 npm run build        # typecheck + production build
+npm run preview      # serve production build locally
+npm run deploy       # deploy contract to network (requires wallet sync + proof server)
+npm run network      # show/set active network
+npm run check-balance# check wallet balance
+npm run proof-server:start  # start proof server (Docker)
+npm run proof-server:stop   # stop proof server
 npm run clean        # remove generated artifacts and build output
 ```
 
@@ -94,15 +141,107 @@ npm run clean        # remove generated artifacts and build output
 ```text
 ├── compiler/contract-info.json   # interface metadata (circuits, witnesses, ledger)
 ├── contract/index.js             # generated contract API (+ index.d.ts, .js.map)
-├── keys/checkEligibility.prover  # proving key
-├── keys/checkEligibility.verifier
-└── zkir/checkEligibility.zkir    # compiled circuit (+ .bzkir)
+├── keys/<circuit>.prover         # proving key (per exported circuit)
+├── keys/<circuit>.verifier
+└── zkir/<circuit>.zkir           # compiled circuit (+ .bzkir)
 ```
 
 ## Notes
 
 * `contracts/managed/` is gitignored and regenerated with `npm run compile`.
-* Lace wallet UI and circuit frontend integration are intentionally deferred to later levels.
+
+## Wallet Connection
+
+PRIESTATE connects to any Midnight DApp Connector v4.x wallet (Lace, 1AM, etc.):
+
+* Browser: `src/dapp-wallet.ts` initializes providers via `connectedAPI.getProvingProvider()`
+* CLI deploy: `src/wallet.ts` uses `wallet-sdk` directly with `WalletFacade`
+* Wallet seed/mnemonic stored in `.midnight-state.json` (gitignored)
+* Wallet sync state cached in `.midnight-wallet-state/` (gitignored)
+
+## Zero-Knowledge Proof Flow
+
+The verification flow proves `propertyValue >= eligibilityThreshold` without revealing the property value:
+
+1. User connects wallet and navigates to `/verify/:id`
+2. `VerifyPage` calls `manager.resolve()` → joins the deployed contract
+3. `PriestateAPI.checkEligibility(propertyValue)`:
+   - Sets `_propertyValue` in the witness module (never exposed to ledger)
+   - Calls `callTx.checkEligibility()` → wallet generates ZK proof
+   - Submits proof transaction via `submitTx()`
+   - Waits for on-chain confirmation via `firstResultAfterTx()`
+4. Post-transaction indexer emits the new `eligibilityResult` (Boolean)
+5. Result saved to `sessionStorage` → displayed on `/verification/:id`
+
+Privacy guarantee: only `eligibilityResult` (true/false) is disclosed on-chain. The property value stays private.
+
+## Preprod Network
+
+The project targets Midnight Preprod by default (`VITE_NETWORK_ID=preprod`):
+
+* RPC: `https://rpc.preprod.midnight.network`
+* Indexer: `https://indexer.preprod.midnight.network/api/v4/graphql`
+* WebSocket: `wss://indexer.preprod.midnight.network/api/v4/graphql/ws`
+* Faucet: `https://midnight-tmnight-preprod.nethermind.dev`
+
+### Deployment
+
+```bash
+# 1. Start proof server (required for ZK proof generation)
+npm run proof-server:start
+
+# 2. Deploy contract (requires wallet sync + funded wallet + PRIVATE_STATE_PASSWORD)
+PRIVATE_STATE_PASSWORD="<>=16 chars>" npm run deploy -- --network preprod
+
+# 3. Restart dev server to pick up the deployed address
+npm run dev
+```
+
+The deployment script:
+* Restores wallet from `.midnight-wallet-state/preprod/`
+* Waits for wallet sync (resumes from checkpoint)
+* Funds wallet from faucet if needed
+* Registers UTXOs for DUST generation
+* Deploys contract via `deployContract()`
+* Saves contract address to `.midnight-state.json`
+
+### Contract Address Lifecycle
+
+```
+npm run deploy
+  → writes address to .midnight-state.json.deployments.preprod
+    → vite.config.ts reads .midnight-state.json at build/dev start
+      → injects __PRIESTATE_DEPLOYED__ = { network: "preprod", address: "..." }
+        → src/contract-address.ts resolves the address
+          → BrowserPriestateManager.resolve() joins the deployed contract
+```
+
+No manual hardcoding required. The address flows automatically from deployment to runtime.
+
+## Proof Server
+
+A local proof server is required for ZK proof generation during deployment:
+
+```bash
+npm run proof-server:start   # starts midnightntwrk/proof-server:8.1.0 on port 6300
+npm run proof-server:stop    # stops the container
+```
+
+The browser uses the wallet's built-in proving provider (no local proof server needed for verification). The proof server is only required for CLI deployment scripts.
+
+## Environment Variables
+
+All secrets use plain (non-`VITE_*`) env vars — never bundled into client JS:
+
+```bash
+# .env (gitignored)
+VITE_NETWORK_ID=preprod
+PRIVATE_STATE_PASSWORD="<>=16 chars"    # encrypts local private-state DB
+OTP_HASH_SECRET="<hex>"                # HMAC for OTP hashing
+SMTP_HOST=smtp.gmail.com               # email OTP delivery
+SMTP_USER=...                          # SMTP credentials
+SMTP_PASS=...
+```
 
 ## Access Control & Roles
 
@@ -152,13 +291,23 @@ authorization is a clearly-labeled demo mechanism (`src/auth/roles.ts`):
 
 1. Set `VITE_DEMO_OFFICER_ADDRESSES` (comma-separated wallet addresses) at
    build time; those addresses are treated as officers.
-2. Or use the “Simulate Officer Sign-In (DEMO)” control on the unauthorized
+2. Or use the "Simulate Officer Sign-In (DEMO)" control on the unauthorized
    screen at `/officer`, which grants the role for the current browser session
    only.
 
 This is client-side and trivially bypassable. It shapes the UI/UX correctly;
 it does not secure anything. A real deployment must replace it with proper
 authorized-officer credentials enforced by the responsible authority.
+
+## Demo Mode
+
+When the verification server is unreachable, the client enters demo mode:
+
+* **Email OTP**: accepts the fixed demo code `123456` (no email sent)
+* **Aadhaar**: shows "Aadhaar-linked mobile verification is not available in this demo"
+* **Demo banner**: "Demo Mode — No email was sent. Use verification code **123456**"
+
+Demo mode is clearly labeled in the UI. No real Aadhaar data is collected or transmitted.
 
 ## Record model — append-only history
 

@@ -19,6 +19,7 @@ import {
 import { BrowserPriestateManager } from '../src/browser-manager.js';
 import {
   firstResultAfterTx,
+  PriestateAPI,
   type PriestateDerivedState,
 } from '../src/priestate-api.js';
 import { setPropertyValue, createWitnesses } from '../src/contract/witnesses.js';
@@ -26,6 +27,7 @@ import {
   saveOnChainEligibility,
   loadOnChainEligibility,
 } from '../src/data/on-chain-result.js';
+import type { PriestateRegistration } from '../src/common-types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -34,7 +36,13 @@ const ADDRESS_A = 'a'.repeat(64);
 const ADDRESS_B = 'b'.repeat(64);
 
 function state(result: boolean): PriestateDerivedState {
-  return { eligibilityThreshold: 100000n, eligibilityResult: result };
+  return {
+    eligibilityThreshold: 100000n,
+    eligibilityResult: result,
+    officer: new Uint8Array(32),
+    registrationCounter: 0n,
+    registrations: new Map<bigint, PriestateRegistration>(),
+  };
 }
 
 function withEnv(key: string, value: string | undefined, fn: () => void | Promise<void>): void | Promise<void> {
@@ -163,6 +171,46 @@ test('[wiring] explicit address still joins; no address keeps deploy gate', asyn
   });
 });
 
+// ─── a2. Registration lifecycle wiring ───────────────────────────────────────
+
+test('[lifecycle] PriestateAPI exposes submit/approve/reject alongside eligibility', () => {
+  const proto = PriestateAPI.prototype as unknown as Record<string, unknown>;
+  for (const method of [
+    'checkEligibility',
+    'submitRegistration',
+    'approveRegistration',
+    'rejectRegistration',
+  ]) {
+    assert.equal(typeof proto[method], 'function', `PriestateAPI.${method} is missing`);
+  }
+});
+
+test('[lifecycle] browser-manager deploy fallback requires the designated officer key', () => {
+  const logger = { info() {}, warn() {}, error() {}, child() { return this; } } as never;
+  const manager = new BrowserPriestateManager(logger);
+  // No fixed address, threshold present but no officer key → the fresh-deploy
+  // fallback (used only as a last resort) must not proceed without the
+  // designated officer designated at deployment.
+  assert.throws(() => manager.resolve(undefined, 100000n), /officer key/i);
+  manager.disconnect();
+});
+
+test('[lifecycle] firstRegistrationIdAfterTx reads the assigned ID after finalize', async () => {
+  const { firstRegistrationIdAfterTx } = await import('../src/priestate-api.js');
+  const tx = Promise.resolve({ txId: '0x2' });
+  // state() returns registrationCounter = 0n, so (counter-1) would underflow —
+  // instead verify the helper surfaces the post-tx counter minus one via a
+  // bespoke emission where the counter is 3n.
+  const custom = new Observable<PriestateDerivedState>((subscriber) => {
+    subscriber.next({
+      ...state(true),
+      registrationCounter: 3n,
+    });
+    subscriber.complete();
+  });
+  assert.equal(await firstRegistrationIdAfterTx(tx, custom), 2n);
+});
+
 // ─── b. On-chain eligibilityResult (never client-side recomputed) ────────────
 
 test('[result] reads eligibilityResult from the post-transaction ledger emission', async () => {
@@ -218,17 +266,24 @@ test('[result] times out instead of guessing when no post-tx state arrives', asy
 
 // ─── c. Private propertyValue preservation ───────────────────────────────────
 
-test('[privacy] witness feeds the module-held value and leaves privateState untouched', () => {
+test('[privacy] secret-key witnesses feed the module-held values and leave privateState untouched', () => {
   const witnesses = createWitnesses();
   const ps = {}; // PRIESTATE has empty private state
   setPropertyValue(123456789n);
+  const secret = new Uint8Array(32);
+  secret[0] = 0x42;
+  // NB: the secret-key setters are exercised through the API layer; here we
+  // confirm the propertyValue witness reads the module-held value and that
+  // private state is never written.
   const [returnedPs, value] = witnesses.propertyValue({ privateState: ps });
   assert.equal(returnedPs, ps, 'private state object identity preserved');
   assert.equal(value, 123456789n);
-  assert.deepEqual(ps, {}, 'propertyValue must NOT be written into private/public state');
+  assert.equal(typeof witnesses.applicantSecretKey, 'function');
+  assert.equal(typeof witnesses.officerSecretKey, 'function');
+  assert.deepEqual(ps, {}, 'witnesses must NOT write into private/public state');
 });
 
-test('[privacy] generated contract ledger exposes only threshold + result — never the witness', () => {
+test('[privacy] generated contract ledger exposes only public metadata — never the private witnesses', () => {
   const info = JSON.parse(
     fs.readFileSync(
       path.join(repoRoot, 'contracts/managed/priestate/compiler/contract-info.json'),
@@ -242,16 +297,33 @@ test('[privacy] generated contract ledger exposes only threshold + result — ne
 
   const circuitNames = info.circuits.map((c) => c.name);
   assert.ok(circuitNames.includes('checkEligibility'));
+  for (const name of ['submitRegistration', 'approveRegistration', 'rejectRegistration']) {
+    assert.ok(circuitNames.includes(name));
+  }
 
   const witnessNames = info.witnesses.map((w) => w.name);
-  assert.deepEqual(witnessNames, ['propertyValue']);
+  assert.deepEqual(
+    [...witnessNames].sort(),
+    ['applicantSecretKey', 'officerSecretKey', 'propertyValue'],
+  );
 
-  // The PUBLIC ledger schema is the privacy boundary: only the threshold and
-  // the boolean result may appear there. The private propertyValue must not.
+  // The PUBLIC ledger schema is the privacy boundary: only the threshold, the
+  // boolean eligibility result, the designated officer, and public registry
+  // metadata may appear there. The private propertyValue and the secret keys
+  // must never be public ledger fields.
   const ledgerNames = info.ledger.map((l) => l.name).sort();
-  assert.deepEqual(ledgerNames, ['eligibilityResult', 'eligibilityThreshold']);
-  assert.ok(!ledgerNames.includes('propertyValue'));
+  assert.deepEqual(ledgerNames, [
+    'eligibilityResult',
+    'eligibilityThreshold',
+    'officer',
+    'registrationCounter',
+    'registrations',
+  ]);
+  for (const forbidden of ['propertyValue', 'applicantSecretKey', 'officerSecretKey']) {
+    assert.ok(!ledgerNames.includes(forbidden), `${forbidden} must stay off the public ledger`);
+  }
 });
+
 
 // ─── b2. Result-record helper passes the ON-CHAIN value through verbatim ─────
 

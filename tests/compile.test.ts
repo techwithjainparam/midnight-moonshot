@@ -19,7 +19,7 @@ test('contract compiles via `compact compile` and lists circuits', () => {
   const res = spawnSync('compact', ['compile', contractSource, managedDir], { encoding: 'utf-8' });
   assert.equal(res.status, 0, `compile failed:\n${res.stderr}`);
   const output = `${res.stdout}\n${res.stderr}`;
-  assert.match(output, /Compiling 1 circuit/i, `expected circuits listed, got:\n${output}`);
+  assert.match(output, /Compiling \d+ circuit/i, `expected circuits listed, got:\n${output}`);
 });
 
 test('compile output produces circuits, keys, and API in managed/', () => {
@@ -44,14 +44,29 @@ test('contract-info.json describes the PRIESTATE contract surface', () => {
   const info = JSON.parse(fs.readFileSync(path.join(managedDir, 'compiler', 'contract-info.json'), 'utf-8'));
 
   assert.ok(Array.isArray(info.circuits));
-  assert.equal(info.circuits.length, 1);
-  assert.equal(info.circuits[0].name, 'checkEligibility');
-  assert.equal(info.circuits[0].pure, false);
-  assert.ok(info.circuits[0].proof, 'checkEligibility should require a proof');
+  assert.equal(info.circuits.length, 4);
+  const circuitNames = info.circuits.map((c: { name: string }) => c.name);
+  assert.deepEqual(
+    [...circuitNames].sort(),
+    ['approveRegistration', 'checkEligibility', 'rejectRegistration', 'submitRegistration'],
+  );
+  for (const c of info.circuits) {
+    assert.equal(c.pure, false);
+    assert.ok(c.proof, `${c.name} should require a proof`);
+  }
 
   const witnessNames = info.witnesses.map((w: { name: string }) => w.name);
-  assert.ok(witnessNames.includes('propertyValue'), `expected propertyValue witness, got ${witnessNames}`);
+  assert.deepEqual(
+    [...witnessNames].sort(),
+    ['applicantSecretKey', 'officerSecretKey', 'propertyValue'],
+  );
 
-  const ledgerNames = info.ledger.map((l: { name: string }) => l.name);
-  assert.deepEqual(ledgerNames, ['eligibilityThreshold', 'eligibilityResult']);
+  const ledgerNames = info.ledger.map((l: { name: string }) => l.name).sort();
+  assert.deepEqual(ledgerNames, [
+    'eligibilityResult',
+    'eligibilityThreshold',
+    'officer',
+    'registrationCounter',
+    'registrations',
+  ]);
 });
