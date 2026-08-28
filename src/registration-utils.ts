@@ -6,8 +6,11 @@
  * represented here in any form.
  */
 
-import { TextEncoder, TextDecoder } from 'util';
 import { RegistrationStatus } from './common-types.js';
+
+// TextEncoder/TextDecoder are web-standard globals available in every
+// supported browser and in Node 11+. No `node:util` import is needed, which
+// keeps this module fully browser-bundlable.
 
 /** Pad or truncate a UTF-8 district string to exactly 32 bytes (Bytes<32>). */
 export function encodeDistrict(district: string): Uint8Array {
