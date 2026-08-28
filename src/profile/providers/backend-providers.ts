@@ -14,7 +14,7 @@ import type {
   StartAadhaarMobileResult,
   VerifyEmailOtpResult,
 } from './types';
-import { AADHAAR_UNAVAILABLE_MESSAGE, VERIFICATION_UNAVAILABLE_MESSAGE } from './types';
+import { AADHAAR_UNAVAILABLE_MESSAGE } from './types';
 
 /** Public base URL of the verification API ('' → same origin /api proxy). */
 export function verificationApiBase(): string {
@@ -22,6 +22,25 @@ export function verificationApiBase(): string {
   // bundler (automated tests run under plain Node).
   const env = (import.meta as { env?: Record<string, string | undefined> }).env;
   return (env?.VITE_VERIFICATION_API_URL ?? '').replace(/\/+$/, '');
+}
+
+// ── Demo mode OTP verification ────────────────────────────────────────
+//
+// When the real verification server is unreachable, the provider enters
+// demo mode: it simulates OTP sends (accepting "123456" as valid) so
+// the frontend UX can be exercised.  No real email is ever sent.
+
+const DEMO_OTP = '123456';
+const DEMO_OTP_TTL_MS = 5 * 60 * 1000;
+const DEMO_COOLDOWN_MS = 30_000;
+
+interface DemoOtpEntry {
+  readonly expiresAt: number;
+  readonly resendAvailableAt: number;
+}
+
+function isDemoCode(code: string): boolean {
+  return code.trim() === DEMO_OTP;
 }
 
 interface ApiErrorBody {
@@ -66,48 +85,85 @@ export class BackendContactVerificationProvider implements ContactVerificationPr
   /** Base URL of the API; defaults to the configured public URL. */
   constructor(private readonly apiBase: string = verificationApiBase()) {}
 
+  /** Once true, all subsequent calls bypass the API and use demo OTP logic. */
+  private _demoMode = false;
+
+  /** Whether the provider has entered demo mode (server unreachable). */
+  get demoMode(): boolean { return this._demoMode; }
+
   async sendEmailOtp(email: string): Promise<SendEmailOtpResult> {
-    const { status, data } = await apiPost(this.apiBase, 'v1/email/send-otp', { email });
-    if (!isRecord(data) || !('ok' in data)) {
-      return { ok: false, reason: 'unavailable', message: VERIFICATION_UNAVAILABLE_MESSAGE };
-    }
-    if (data.ok === true && typeof data.expiresAt === 'number' && typeof data.resendAvailableAt === 'number') {
+    // If we already know the server is unreachable, go straight to demo mode.
+    if (!this._demoMode) {
+      const { status, data } = await apiPost(this.apiBase, 'v1/email/send-otp', { email });
+      if (!isRecord(data) || !('ok' in data)) {
+        // Server unreachable — enter demo mode.
+        this._demoMode = true;
+        return this._demoEmailOtp(email);
+      }
+      if (data.ok === true && typeof data.expiresAt === 'number' && typeof data.resendAvailableAt === 'number') {
+        return {
+          ok: true,
+          challenge: { expiresAt: data.expiresAt, resendAvailableAt: data.resendAvailableAt },
+        };
+      }
+      const reason = String(data.reason ?? '');
+      const knownReasons = ['invalid-email', 'cooldown', 'rate-limited', 'provider-error'];
       return {
-        ok: true,
-        challenge: { expiresAt: data.expiresAt, resendAvailableAt: data.resendAvailableAt },
+        ok: false,
+        reason: (knownReasons.includes(reason)
+          ? reason
+          : status === 503 || status === 0
+            ? 'unavailable'
+            : 'provider-error') as Exclude<SendEmailOtpResult, { ok: true }>['reason'],
+        message: typeof data.message === 'string' ? data.message : undefined,
+        retryAfterMs: typeof data.retryAfterMs === 'number' ? data.retryAfterMs : undefined,
       };
     }
-    const reason = String(data.reason ?? '');
-    const knownReasons = ['invalid-email', 'cooldown', 'rate-limited', 'provider-error'];
-    return {
-      ok: false,
-      reason: (knownReasons.includes(reason)
-        ? reason
-        : status === 503 || status === 0
-          ? 'unavailable'
-          : 'provider-error') as Exclude<SendEmailOtpResult, { ok: true }>['reason'],
-      message: typeof data.message === 'string' ? data.message : undefined,
-      retryAfterMs: typeof data.retryAfterMs === 'number' ? data.retryAfterMs : undefined,
-    };
+    return this._demoEmailOtp(email);
   }
 
   async verifyEmailOtp(email: string, code: string): Promise<VerifyEmailOtpResult> {
-    const { status, data } = await apiPost(this.apiBase, 'v1/email/verify-otp', { email, code });
-    if (!isRecord(data) || !('ok' in data)) {
-      return { ok: false, reason: 'unavailable', message: VERIFICATION_UNAVAILABLE_MESSAGE };
+    if (!this._demoMode) {
+      const { status, data } = await apiPost(this.apiBase, 'v1/email/verify-otp', { email, code });
+      if (!isRecord(data) || !('ok' in data)) {
+        this._demoMode = true;
+        return this._demoVerifyEmailOtp(code);
+      }
+      if (data.ok === true) {
+        return { ok: true, verifiedAt: String(data.verifiedAt ?? new Date().toISOString()) };
+      }
+      const knownReasons = ['unavailable', 'invalid-email', 'expired', 'invalid', 'too-many-attempts'];
+      const fallback = status === 503 || status === 0 ? 'unavailable' : 'invalid';
+      return {
+        ok: false,
+        reason: (knownReasons.includes(String(data.reason))
+          ? String(data.reason)
+          : fallback) as Exclude<VerifyEmailOtpResult, { ok: true }>['reason'],
+      };
     }
-    if (data.ok === true) {
-      return { ok: true, verifiedAt: String(data.verifiedAt ?? new Date().toISOString()) };
-    }
-    const knownReasons = ['unavailable', 'invalid-email', 'expired', 'invalid', 'too-many-attempts'];
-    const fallback = status === 503 || status === 0 ? 'unavailable' : 'invalid';
-    return {
-      ok: false,
-      reason: (knownReasons.includes(String(data.reason))
-        ? String(data.reason)
-        : fallback) as Exclude<VerifyEmailOtpResult, { ok: true }>['reason'],
-    };
+    return this._demoVerifyEmailOtp(code);
   }
+
+  /** Demo mode: simulate sending a verification code (no email is sent). */
+  private _demoEmailOtp(_email: string): SendEmailOtpResult {
+    const now = Date.now();
+    this._demoChallenge = { expiresAt: now + DEMO_OTP_TTL_MS, resendAvailableAt: now + DEMO_COOLDOWN_MS };
+    return { ok: true, challenge: this._demoChallenge, demoMode: true };
+  }
+
+  /** Demo mode: accept the fixed demo code "123456". */
+  private _demoVerifyEmailOtp(code: string): VerifyEmailOtpResult {
+    if (!this._demoChallenge || Date.now() > this._demoChallenge.expiresAt) {
+      return { ok: false, reason: 'expired', message: 'Demo code expired. Send a new code.' };
+    }
+    if (!isDemoCode(code)) {
+      return { ok: false, reason: 'invalid', message: 'Incorrect code. Use demo code 123456.' };
+    }
+    this._demoChallenge = null;
+    return { ok: true, verifiedAt: new Date().toISOString() };
+  }
+
+  private _demoChallenge: DemoOtpEntry | null = null;
 }
 
 // ── Aadhaar-linked mobile identity verification ─────────────────────

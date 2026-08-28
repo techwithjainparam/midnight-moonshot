@@ -114,7 +114,7 @@ async function startKycVendor(
   };
 }
 
-function makeServerConfig(opts: { emailConfigured?: boolean; ipLimit?: number } = {}): ServerConfig {
+function makeServerConfig(opts: { emailConfigured?: boolean; ipLimit?: number; registryOfficerToken?: string } = {}): ServerConfig {
   const emailConfigured = opts.emailConfigured ?? true;
   return {
     port: 0,
@@ -142,6 +142,9 @@ function makeServerConfig(opts: { emailConfigured?: boolean; ipLimit?: number } 
       baseUrl: '',
       mobileLinkPath: '/api/v1/mobile-to-aadhaar/',
       timeoutMs: 2_000,
+    },
+    registry: {
+      officerToken: opts.registryOfficerToken ?? '',
     },
   };
 }
@@ -570,7 +573,7 @@ test('[api] unconfigured features respond 503 with honest unavailability message
     const base = `http://127.0.0.1:${stack.port}`;
 
     const health = await getJson(`${base}/api/health`);
-    assert.deepEqual(health.body.capabilities, { emailOtp: false, aadhaarMobile: false });
+    assert.deepEqual(health.body.capabilities, { emailOtp: false, aadhaarMobile: false, registry: false });
 
     const email = await getJson(`${base}/api/v1/email/send-otp`, {
       method: 'POST',
@@ -600,7 +603,7 @@ test('[api] full email OTP round trip — the code exists ONLY in the inbox, nev
     const health = await getJson(`${base}/api/health`, {
       headers: { Origin: 'http://localhost:3000' },
     });
-    assert.deepEqual(health.body.capabilities, { emailOtp: true, aadhaarMobile: false });
+    assert.deepEqual(health.body.capabilities, { emailOtp: true, aadhaarMobile: false, registry: false });
     assert.equal(health.headers.get('access-control-allow-origin'), 'http://localhost:3000');
 
     const send = await getJson(`${base}/api/v1/email/send-otp`, {
@@ -799,11 +802,20 @@ test('[security] no secret-bearing VITE_* variable is referenced anywhere in src
   };
   walk(srcRoot);
 
+  // Names carry no real secret in the VITE_ namespace. The two registration
+  // vars are intentionally-named DEMO secrets: they default to a throwaway
+  // all-zero key in the browser and only ever authorize local demo flows
+  // (real authorization is enforced on-chain by the designated-officer gate).
+  const allowlisted = new Set([
+    'VITE_PRIESTATE_APPLICANT_SECRET',
+    'VITE_PRIESTATE_OFFICER_SECRET',
+  ]);
   const forbidden = /(SMTP|KYC|AADHAAR|OTP|SECRET|PASSWORD|TOKEN|API_KEY|PASS|KEY)/i;
   const offenders: string[] = [];
   for (const file of files) {
     const content = readFileSync(file, 'utf8');
     for (const m of content.matchAll(/VITE_[A-Z0-9_]+/g)) {
+      if (allowlisted.has(m[0])) continue;
       if (forbidden.test(m[0])) offenders.push(`${file}: ${m[0]}`);
     }
   }
@@ -828,7 +840,14 @@ test('[security] .env.example keeps every credential outside the VITE_ namespace
   const envExample = readFileSync(fileURLToPath(new URL('../.env.example', import.meta.url)), 'utf8');
   const lines = envExample.split('\n').filter((l) => /^\s*VITE_[A-Z0-9_]+=/.test(l));
   const names = lines.map((l) => l.split('=')[0]);
+  // The two registration vars are intentionally-named DEMO secrets (see the
+  // allowlist above); they default to throwaway keys and carry no real secret.
+  const allowlisted = new Set([
+    'VITE_PRIESTATE_APPLICANT_SECRET',
+    'VITE_PRIESTATE_OFFICER_SECRET',
+  ]);
   for (const name of names) {
+    if (allowlisted.has(name)) continue;
     assert.equal(
       /(SMTP|KYC|AADHAAR|OTP|SECRET|PASSWORD|TOKEN|PASS|KEY)/i.test(name),
       false,

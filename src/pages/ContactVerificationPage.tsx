@@ -16,7 +16,7 @@ import {
   contactVerificationProvider,
   identityVerificationProvider,
   AADHAAR_UNAVAILABLE_MESSAGE,
-  VERIFICATION_UNAVAILABLE_MESSAGE,
+  DEMO_MODE_SENT_MESSAGE,
 } from '../profile/providers';
 
 // FEATURE 1 — Contact & identity verification screen (REAL providers).
@@ -199,6 +199,7 @@ function EmailVerificationCard({
   const [nowTick, setNowTick] = useState(Date.now());
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [demoMode, setDemoMode] = useState(false);
   const [code, setCode] = useState('');
   const [otpError, setOtpError] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
@@ -220,7 +221,7 @@ function EmailVerificationCard({
       if (!result.ok) {
         switch (result.reason) {
           case 'unavailable':
-            setSendError(VERIFICATION_UNAVAILABLE_MESSAGE);
+            setSendError(DEMO_MODE_SENT_MESSAGE);
             break;
           case 'cooldown':
           case 'rate-limited': {
@@ -239,6 +240,7 @@ function EmailVerificationCard({
       setPendingValue(value);
       setExpiresAt(result.challenge.expiresAt);
       setCooldownEndsAt(result.challenge.resendAvailableAt);
+      setDemoMode(Boolean(result.demoMode));
       setCode('');
       setOtpError(null);
       setStep('otp');
@@ -270,6 +272,7 @@ function EmailVerificationCard({
         setPendingValue(null);
         setExpiresAt(null);
         setCooldownEndsAt(null);
+        setDemoMode(false);
         return;
       }
       switch (result.reason) {
@@ -280,15 +283,18 @@ function EmailVerificationCard({
           setOtpError('Too many incorrect attempts. Send a new code and try again.');
           break;
         case 'unavailable':
-          setOtpError(VERIFICATION_UNAVAILABLE_MESSAGE);
+          setOtpError(DEMO_MODE_SENT_MESSAGE);
+          break;
+        case 'invalid':
+          setOtpError(demoMode ? 'Incorrect code. Use demo code 123456.' : 'Incorrect code. Check the code sent to your email and try again.');
           break;
         default:
-          setOtpError('Incorrect code. Check the code sent to your email and try again.');
+          setOtpError(demoMode ? 'Incorrect code. Use demo code 123456.' : 'Incorrect code. Check the code sent to your email and try again.');
       }
     } finally {
       setVerifying(false);
     }
-  }, [code, onVerified, pendingValue]);
+  }, [code, demoMode, onVerified, pendingValue]);
 
   const resendBlockedForS =
     cooldownEndsAt !== null && nowTick < cooldownEndsAt ? Math.ceil((cooldownEndsAt - nowTick) / 1000) : 0;
@@ -334,13 +340,20 @@ function EmailVerificationCard({
         </>
       ) : (
         <>
+          {demoMode && (
+            <div className="demo-mode-banner" role="status">
+              <span className="demo-mode-banner-icon" aria-hidden="true">⚠</span>
+              <span>Demo Mode — No email was sent. Use verification code <strong>123456</strong>.</span>
+            </div>
+          )}
+
           <p className="profile-otp-context">
             Enter the verification code sent to your email{' '}
             <strong>{pendingValue}</strong>.
           </p>
 
           {sendError && <div className="status-msg error" role="alert">{sendError}</div>}
-          {expiresAt !== null && nowTick < expiresAt && (
+          {!demoMode && expiresAt !== null && nowTick < expiresAt && (
             <p className="profile-otp-sent-note">
               The code expires {Math.ceil((expiresAt - nowTick) / 60000)} minute(s) after issue — request a new one if it does not arrive.
             </p>
@@ -366,12 +379,12 @@ function EmailVerificationCard({
 
           <div className="profile-otp-actions">
             <button className="btn btn-primary" onClick={() => void handleVerify()} disabled={code.length !== 6 || verifying}>
-              {verifying ? 'Verifying…' : 'Verify'}
+              {verifying ? 'Verifying…' : 'Verify email'}
             </button>
             <button className="btn btn-ghost" onClick={() => pendingValue && void sendCode(pendingValue)} disabled={sending || resendBlockedForS > 0}>
               {resendBlockedForS > 0 ? `Resend in ${formatWait(resendBlockedForS)}` : 'Resend code'}
             </button>
-            <button className="btn btn-ghost" onClick={() => { setStep('input'); setOtpError(null); setSendError(null); }}>
+            <button className="btn btn-ghost" onClick={() => { setStep('input'); setOtpError(null); setSendError(null); setDemoMode(false); }}>
               Change Email
             </button>
           </div>
@@ -521,6 +534,13 @@ function AadhaarMobileCard({
 
       {available === false && (
         <div className="status-msg info" role="status">{AADHAAR_UNAVAILABLE_MESSAGE}</div>
+      )}
+      {available === false && (
+        <p className="verify-card-desc">
+          Aadhaar-linked mobile verification requires a live identity/KYC
+          provider connection, which is not available in this demo build.
+          Email verification is fully functional as a demo flow.
+        </p>
       )}
       {available !== false && (
         <p className="verify-card-desc">

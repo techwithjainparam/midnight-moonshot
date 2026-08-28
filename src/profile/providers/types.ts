@@ -14,8 +14,9 @@
 // shows the honest "currently unavailable" state.
 
 export const VERIFICATION_UNAVAILABLE_MESSAGE = 'Verification service unavailable.';
+export const DEMO_MODE_SENT_MESSAGE = 'Demo verification code sent — use 123456 to verify.';
 export const AADHAAR_UNAVAILABLE_MESSAGE =
-  'Aadhaar-linked mobile verification is currently unavailable.';
+  'Aadhaar-linked mobile verification is not available in this demo.';
 
 // ── Email (contact) ─────────────────────────────────────────────────
 
@@ -26,7 +27,7 @@ export interface EmailOtpChallenge {
 }
 
 export type SendEmailOtpResult =
-  | { ok: true; challenge: EmailOtpChallenge }
+  | { ok: true; challenge: EmailOtpChallenge; demoMode?: boolean }
   | {
       ok: false;
       reason: 'unavailable' | 'invalid-email' | 'cooldown' | 'rate-limited' | 'provider-error';
