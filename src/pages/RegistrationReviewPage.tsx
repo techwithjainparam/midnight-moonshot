@@ -1,9 +1,13 @@
 import { useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import ProductBanner from '../components/ProductBanner';
-import { useWallet } from '../hooks/useWallet';
+import { useWallet, describeError } from '../hooks/useWallet';
 import ProofAnimation from '../ProofAnimation';
 import { type VerificationStep } from '../components/VerificationProgress';
+import { getApplicantSecretKey } from '../secret-keys';
+import { encodeDistrict, parseAreaFromLandString } from '../registration-utils';
+import { toRegistryMetadataInput, createApplicationMetadata } from '../registry/registry-client';
+import type { PriestateAPI } from '../priestate-api';
 
 interface RegistrationData {
   ownerName: string;
@@ -43,49 +47,102 @@ export default function RegistrationReviewPage() {
   const [step, setStep] = useState<'review' | 'submitting' | 'submitted'>('review');
   const [proofStep, setProofStep] = useState<VerificationStep>('wallet-required');
   const [onChainEligible, setOnChainEligible] = useState<boolean | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submittedId, setSubmittedId] = useState<bigint | null>(null);
+  // Honest metadata-sync note. The on-chain submission is the source of truth;
+  // a failed backend sync never turns a successful submission into a failure.
+  const [metadataNote, setMetadataNote] = useState<string | null>(null);
+
+  // Resolve (join/deploy) the contract and wait until deployment settles,
+  // returning the deployed PriestateAPI. The eligibility proof flow and the
+  // submit flow share this so a single contract connection is reused.
+  const resolveApi = useCallback((): Promise<PriestateAPI> => {
+    const threshold = 1000000n;
+    const deployment$ = wallet.manager.resolve(undefined, threshold);
+    return new Promise<PriestateAPI>((resolve, reject) => {
+      const sub = deployment$.subscribe({
+        next: (d) => {
+          if (d.status === 'deployed') { sub.unsubscribe(); resolve(d.api); }
+          if (d.status === 'failed') { sub.unsubscribe(); reject(d.error); }
+        },
+        error: (err) => { sub.unsubscribe(); reject(err); },
+      });
+    });
+  }, [wallet]);
 
   const handleProofFlow = useCallback(async () => {
     if (!wallet.wallet) return;
     setProofStep('preparing');
     try {
-      const threshold = 1000000n;
-      const deployment$ = wallet.manager.resolve(undefined, threshold);
-      await new Promise<void>((resolve, reject) => {
-        const sub = deployment$.subscribe({
-          next: (d) => {
-            if (d.status === 'deployed') { sub.unsubscribe(); resolve(); }
-            if (d.status === 'failed') { sub.unsubscribe(); reject(d.error); }
-          },
-          error: (err) => { sub.unsubscribe(); reject(err); },
-        });
-      });
+      const api = await resolveApi();
       setProofStep('generating-proof');
-      const deployment = wallet.deployments.find(
-        (d) => d.status === 'deployed' && d.api.deployedContractAddress
-      );
-      if (deployment && deployment.status === 'deployed') {
-        const val = data.propertyValue ? BigInt(data.propertyValue.replace(/[,_]/g, '')) : 0n;
-        // Resolves with the ON-CHAIN eligibilityResult from the contract's
-        // public ledger state — never a client-side recomputation. The
-        // private property value stays inside the witness.
-        const result = await deployment.api.checkEligibility(val);
-        setOnChainEligible(result);
-        setProofStep('verified');
-      } else {
-        throw new Error('Contract deployment did not complete.');
-      }
+      const val = data.propertyValue ? BigInt(data.propertyValue.replace(/[,_]/g, '')) : 0n;
+      // Resolves with the ON-CHAIN eligibilityResult from the contract's
+      // public ledger state — never a client-side recomputation. The
+      // private property value stays inside the witness.
+      const result = await api.checkEligibility(val);
+      setOnChainEligible(result);
+      setProofStep('verified');
     } catch {
       setProofStep('error');
     }
-  }, [wallet, data]);
+  }, [wallet, data, resolveApi]);
 
-  const handleSubmit = useCallback(() => {
+  // Submit the registration ON-CHAIN via the submitRegistration circuit. The
+  // applicant secret derives the owner binding; district/area/submittedAt are
+  // public registry metadata. The private property VALUE is never sent here.
+  //
+  // After a SUCCESSFUL on-chain submission (the source of truth), the app
+  // persists ONLY safe public metadata referencing the real on-chain id to the
+  // registry backend. A backend failure never turns a successful submission
+  // into a failure — it surfaces as an honest "recorded on-chain, metadata
+  // sync pending" note.
+  const handleSubmit = useCallback(async () => {
+    setSubmitError(null);
+    setMetadataNote(null);
     setStep('submitting');
-    setTimeout(() => {
-      sessionStorage.removeItem('pendingRegistration');
+    try {
+      const api = await resolveApi();
+      const registrationId = await api.submitRegistration(
+        getApplicantSecretKey(),
+        parseAreaFromLandString(data.landArea),
+        encodeDistrict(data.district || 'Pune'),
+        BigInt(Date.now()),
+      );
+      // On-chain submission succeeded — the registration is recorded. This is
+      // authoritative regardless of what the metadata backend does next.
+      setSubmittedId(registrationId);
       setStep('submitted');
-    }, 2000);
-  }, []);
+
+      // Best-effort metadata sync. Clean the temporary draft regardless; the
+      // draft was only used to carry the user's input to this review screen.
+      try {
+        sessionStorage.removeItem('pendingRegistration');
+      } catch {
+        // ignore: sessionStorage is only a temporary draft, never authoritative
+      }
+
+      try {
+        const meta = await createApplicationMetadata(
+          toRegistryMetadataInput(data, registrationId),
+        );
+        if (!meta.ok) {
+          setMetadataNote(
+            meta.reason === 'unavailable'
+              ? 'Recorded on-chain. Registry metadata sync is unavailable (backend not configured).'
+              : 'Recorded on-chain, but registry metadata sync could not be completed. It can be catalogued by an authorized officer.',
+          );
+        }
+      } catch {
+        setMetadataNote(
+          'Recorded on-chain, but registry metadata sync could not be completed. It can be catalogued by an authorized officer.',
+        );
+      }
+    } catch (e: unknown) {
+      setStep('review');
+      setSubmitError(describeError(e));
+    }
+  }, [data, resolveApi]);
 
   if (step === 'submitted') {
     return (
@@ -99,9 +156,20 @@ export default function RegistrationReviewPage() {
           </div>
           <h1 className="page-title">Registration Submitted</h1>
           <p className="page-desc" style={{ maxWidth: 480 }}>
-            Your property registration application has been submitted for
-            authorized officer review. You can track the status in the registry.
+            Your property registration has been recorded on-chain for
+            authorized officer review. You can track its status from the
+            on-chain registry.
           </p>
+          {submittedId !== null && (
+            <p className="page-desc" style={{ maxWidth: 480 }}>
+              Registration ID: <code className="officer-td-mono">{submittedId.toString()}</code>
+            </p>
+          )}
+          {metadataNote && (
+            <p className="page-desc" style={{ maxWidth: 480 }}>
+              {metadataNote}
+            </p>
+          )}
           <div className="register-success-actions">
             <Link to="/registry" className="btn btn-primary btn-lg">View Registry</Link>
             <Link to="/dashboard" className="btn btn-ghost btn-lg">My Dashboard</Link>
@@ -253,8 +321,14 @@ export default function RegistrationReviewPage() {
           )}
           {proofStep === 'error' && <ProofAnimation status="error" />}
 
+          {submitError && (
+            <div className="status-msg error" role="alert" style={{ marginTop: '1rem' }}>
+              Submission failed: {submitError}
+            </div>
+          )}
+
           <div className="review-submit-section">
-            <button className="btn btn-primary btn-lg review-submit-btn" onClick={handleSubmit} disabled={step === 'submitting'}>
+            <button className="btn btn-primary btn-lg review-submit-btn" onClick={() => void handleSubmit()} disabled={step === 'submitting'}>
               {step === 'submitting' ? 'Submitting...' : 'Submit for Authorized Review'}
             </button>
             <p className="review-submit-note">

@@ -1,8 +1,8 @@
 import { Link } from 'react-router-dom';
 import ProductBanner from '../components/ProductBanner';
-import { MOCK_PROPERTIES } from '../data/mock-properties';
 import { useAuth } from '../auth/AuthContext';
-import { DEMO_USER_PROPERTY_IDS } from '../auth/roles';
+import { usePriestateRegistrations } from '../hooks/usePriestateRegistrations';
+import { registrationCounts } from '../registration-view';
 import { getContactProfile, type ContactProfile } from '../profile/contact-verification';
 
 function truncAddr(addr: string): string {
@@ -10,32 +10,29 @@ function truncAddr(addr: string): string {
   return `${addr.slice(0, 14)}...${addr.slice(-8)}`;
 }
 
-function myStatusClass(status: string): string {
-  switch (status) {
-    case 'APPROVED': return 'status-registered';
-    case 'PENDING_REVIEW': return 'status-pending';
-    case 'SUBMITTED': return 'status-submitted';
-    case 'REJECTED': return 'status-rejected';
-    default: return 'status-draft';
-  }
-}
-
-// USER dashboard: own application/property information and public
-// registry aggregates only. Officer queue, officer notes, and
-// administrative data are NOT shown here — they live exclusively in the
-// Officer Portal behind the officer role check.
+// USER dashboard: own application/property information and public registry
+// aggregates only. Officer queue, officer notes, and administrative data are
+// NOT shown here — they live exclusively in the Officer Portal behind the
+// officer role check.
 export default function DashboardPage() {
   const { wallet, address } = useAuth();
   const { walletState, deployments, connect } = wallet;
 
+  // Public registry aggregates read from the REAL contract ledger state.
+  const { registrations } = usePriestateRegistrations(1_000_000n, wallet);
+  const counts = registrationCounts(registrations);
+
   // Own contact profile (FEATURE 1) — private to this wallet.
   const contactProfile: ContactProfile | null = address ? getContactProfile(address) : null;
 
-  // Public registry aggregate: finalized public records only.
-  const publicCount = MOCK_PROPERTIES.filter((p) => p.registrationStatus === 'APPROVED').length;
+  // Public registry aggregate: finalized public records only (on-chain).
+  const publicCount = counts.approved;
 
-  // Own records (demo binding — see src/auth/roles.ts).
-  const myProperties = MOCK_PROPERTIES.filter((p) => DEMO_USER_PROPERTY_IDS.includes(p.id));
+  // Ownership attribution of on-chain records is not available in-browser:
+  // the disclosed owner key is the applicant's derived DApp public key, which
+  // cannot be recomputed client-side (its derivation uses a contract-internal
+  // descriptor). Listing "my properties" from mock IDs would fabricate data,
+  // so we show an honest unavailable state instead.
 
   return (
     <div className="page dashboard-page">
@@ -134,22 +131,13 @@ export default function DashboardPage() {
             <h2 className="dashboard-card-title">My Properties</h2>
           </div>
           <div className="dashboard-card-body">
-            {myProperties.length > 0 ? (
-              <div className="dash-my-properties">
-                {myProperties.map((p) => (
-                  <Link key={p.id} to={`/property/${p.id}`} className="dash-my-property">
-                    <span className="dash-my-prop-id">{p.propertyId}</span>
-                    <span className={`status-pill ${myStatusClass(p.registrationStatus)}`}>
-                      {p.registrationStatus.replace('_', ' ')}
-                    </span>
-                  </Link>
-                ))}
-              </div>
-            ) : (
-              <p className="dash-empty-text">
-                No properties registered yet.
-              </p>
-            )}
+            <p className="dash-empty-text">
+              On-chain ownership attribution is not yet available in this
+              build: the disclosed owner key is derived from the applicant&apos;s
+              secret key, which cannot be recomputed client-side. Your
+              registrations will appear here once an off-chain registry
+              backend links the ledger to your wallet.
+            </p>
             <Link to="/register" className="btn btn-ghost btn-sm" style={{ marginTop: '0.75rem' }}>
               Register New Property
             </Link>
@@ -221,11 +209,9 @@ export default function DashboardPage() {
               <Link to="/registry" className="btn btn-primary dash-action-btn">
                 Browse Registry
               </Link>
-              {myProperties.length > 0 && (
-                <Link to={`/property/${myProperties[0].id}`} className="btn btn-ghost dash-action-btn">
-                  View My Property
-                </Link>
-              )}
+              <Link to="/register" className="btn btn-ghost dash-action-btn">
+                Register Property
+              </Link>
             </div>
           </div>
         </div>
