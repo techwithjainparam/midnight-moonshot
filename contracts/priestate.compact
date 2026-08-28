@@ -2,17 +2,125 @@ pragma language_version >= 0.23;
 
 import CompactStandardLibrary;
 
+// Lifecycle status of a property registration record.
+export enum RegistrationStatus {
+  PENDING,
+  APPROVED,
+  REJECTED,
+}
+
+// Public registry record for one property registration.
+//
+// Public metadata + owner/applicant binding + lifecycle status. The private
+// property VALUE is deliberately NOT stored here; it lives only in the
+// `propertyValue` witness and is used as a witness for the eligibility circuit.
+export struct Registration {
+  owner: Bytes<32>,
+  area: Uint<64>,
+  status: RegistrationStatus,
+  district: Bytes<32>,
+  submittedAt: Uint<64>,
+  reviewedBy: Bytes<32>,
+  reviewedAt: Uint<64>,
+}
+
+// ── Sealed configuration (set once at deployment, immutable thereafter) ──────
 export sealed ledger eligibilityThreshold: Uint<64>;
 
+// Designated officer DApp public key. Only this single officer may approve or
+// reject registrations. The contract proves the caller holds the matching
+// secret by re-deriving this public key inside the circuit and comparing.
+export sealed ledger officer: Bytes<32>;
+
+// ── Public registry ──────────────────────────────────────────────────────────
+export ledger registrationCounter: Counter;
+export ledger registrations: Map<Uint<64>, Registration>;
+
+// ── Eligibility (existing circuit result) ────────────────────────────────────
 export ledger eligibilityResult: Boolean;
 
+// ── Private witnesses ────────────────────────────────────────────────────────
+// propertyValue: private property VALUE, used as a witness for eligibility.
 witness propertyValue(): Uint<64>;
+// Per-actor secret keys living in the client; used only to derive DApp public
+// keys. A public key is disclosed only where a binding or authorization needs
+// to be recorded on the ledger.
+witness applicantSecretKey(): Bytes<32>;
+witness officerSecretKey(): Bytes<32>;
 
+// Derive a DApp-specific public key from a secret key, domain-separated so the
+// identity is unlinkable across DApps.
+circuit deriveDappKey(secretKey: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([
+    pad(32, "priestate:dapp-pk"),
+    secretKey,
+  ]);
+}
+
+// Owner/Builder submits a new property registration. The applicant's derived
+// DApp public key is disclosed as the owner/applicant binding; the registration
+// is created in PENDING state awaiting the designated officer's review.
+export circuit submitRegistration(area: Uint<64>, district: Bytes<32>, submittedAt: Uint<64>): [] {
+  const owner = deriveDappKey(applicantSecretKey());
+  const id = registrationCounter.read();
+  registrationCounter.increment(1);
+  registrations.insert(id, Registration {
+    owner: disclose(owner),
+    area: disclose(area),
+    status: RegistrationStatus.PENDING,
+    district: disclose(district),
+    submittedAt: disclose(submittedAt),
+    reviewedBy: disclose(pad(32, "")),
+    reviewedAt: disclose(0),
+  });
+}
+
+// Officer approves a PENDING registration.
+export circuit approveRegistration(registrationId: Uint<64>, reviewedAt: Uint<64>): [] {
+  const officerPk = deriveDappKey(officerSecretKey());
+  assert(disclose(officerPk) == officer, "Only the designated officer can approve registrations");
+  assert(registrations.member(disclose(registrationId)), "Registration not found");
+  const rec = registrations.lookup(disclose(registrationId));
+  assert(rec.status == RegistrationStatus.PENDING, "Registration is not pending");
+  registrations.insert(disclose(registrationId), Registration {
+    owner: rec.owner,
+    area: rec.area,
+    status: RegistrationStatus.APPROVED,
+    district: rec.district,
+    submittedAt: rec.submittedAt,
+    reviewedBy: disclose(officerPk),
+    reviewedAt: disclose(reviewedAt),
+  });
+}
+
+// Officer rejects a PENDING registration.
+export circuit rejectRegistration(registrationId: Uint<64>, reviewedAt: Uint<64>): [] {
+  const officerPk = deriveDappKey(officerSecretKey());
+  assert(disclose(officerPk) == officer, "Only the designated officer can reject registrations");
+  assert(registrations.member(disclose(registrationId)), "Registration not found");
+  const rec = registrations.lookup(disclose(registrationId));
+  assert(rec.status == RegistrationStatus.PENDING, "Registration is not pending");
+  registrations.insert(disclose(registrationId), Registration {
+    owner: rec.owner,
+    area: rec.area,
+    status: RegistrationStatus.REJECTED,
+    district: rec.district,
+    submittedAt: rec.submittedAt,
+    reviewedBy: disclose(officerPk),
+    reviewedAt: disclose(reviewedAt),
+  });
+}
+
+// Keep the existing eligibility circuit working: prove propertyValue is at or
+// above the sealed threshold without revealing the value. Only the boolean
+// outcome is disclosed on the ledger.
 export circuit checkEligibility(): [] {
   const value = propertyValue();
   eligibilityResult = disclose(value >= eligibilityThreshold);
 }
 
-constructor(threshold: Uint<64>) {
+constructor(threshold: Uint<64>, designatedOfficer: Bytes<32>) {
   eligibilityThreshold = disclose(threshold);
+  officer = disclose(designatedOfficer);
+  registrationCounter.resetToDefault();
 }

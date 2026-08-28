@@ -7,6 +7,10 @@ interface ImportMetaEnv {
   readonly VITE_DEFAULT_CONTRACT?: string;
   readonly VITE_DEFAULT_THRESHOLD?: string;
   readonly VITE_DEMO_OFFICER_ADDRESSES?: string;
+  /** DEMO ONLY 32-byte (64-hex) secret fed to the applicantSecretKey witness. */
+  readonly VITE_PRIESTATE_APPLICANT_SECRET?: string;
+  /** DEMO ONLY 32-byte (64-hex) secret fed to the officerSecretKey witness. */
+  readonly VITE_PRIESTATE_OFFICER_SECRET?: string;
 }
 
 /**

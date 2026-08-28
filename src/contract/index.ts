@@ -1,7 +1,13 @@
 import { CompiledContract } from '@midnight-ntwrk/compact-js';
 
 export * as Priestate from '../../contracts/managed/priestate/contract/index.js';
-export { createWitnesses, setPropertyValue, createPriestatePrivateState } from './witnesses.js';
+export {
+  createWitnesses,
+  setPropertyValue,
+  setApplicantSecretKey,
+  setOfficerSecretKey,
+  createPriestatePrivateState,
+} from './witnesses.js';
 export type { PriestatePrivateState } from './witnesses.js';
 
 import * as PriestateContract from '../../contracts/managed/priestate/contract/index.js';
