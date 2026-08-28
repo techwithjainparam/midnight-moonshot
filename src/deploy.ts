@@ -30,7 +30,7 @@ import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-pri
 import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
 
 import { resolveNetwork, getOrCreateWallet, formatWalletBackupNotice, recordDeployment } from './network';
-import { createWallet, persistWalletState, unshieldedToken, type WalletContext } from './wallet';
+import { createWallet, persistWalletState, unshieldedToken, waitForSyncedStateWithProgress, type WalletContext } from './wallet';
 import { CompiledPriestateContract, createPriestatePrivateState } from './contract/index.js';
 
 // @ts-expect-error Required for wallet sync
@@ -61,6 +61,51 @@ function parseThreshold(argv: string[]): bigint {
 }
 
 const THRESHOLD = parseThreshold(process.argv);
+
+// ─── Designated officer (constructor arg) ──────────────────────────────────────
+//
+// The deployer-designated officer DApp public key is a 32-byte value (the
+// domain-separated public key of the officer secret, as derived by the
+// contract's `deriveDappKey` circuit). Supply it as 64 hex chars via
+// `--officer <hex>` or the PRIESTATE_OFFICER env var.
+//
+// NOTE: The 32-byte all-zero placeholder is deliberately NOT a useable officer
+// key — no secret derives to it — so officer operations stay de-authorized
+// unless a real officer public key is configured before a real deployment.
+
+const ZERO_OFFICER = new Uint8Array(32);
+
+function parseOfficer(argv: string[]): Uint8Array {
+  let raw: string | undefined;
+  for (let i = 2; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--officer') {
+      raw = argv[i + 1];
+      break;
+    }
+    if (arg.startsWith('--officer=')) {
+      raw = arg.slice('--officer='.length);
+      break;
+    }
+  }
+  if (raw === undefined) raw = process.env.PRIESTATE_OFFICER?.trim() || undefined;
+  if (raw === undefined || raw === '') {
+    console.warn('\n  ⚠  No designated officer public key supplied (--officer or PRIESTATE_OFFICER).');
+    console.warn('     The officer role will be unusable after deploy unless a real key is set.\n');
+    return ZERO_OFFICER;
+  }
+  const hex = raw.replace(/^0x/i, '');
+  if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
+    throw new Error(`Invalid --officer "${raw}" — expected exactly 64 hex chars (32-byte DApp public key).`);
+  }
+  const bytes = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) {
+    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+const OFFICER = parseOfficer(process.argv);
 
 // ─── Network configuration ─────────────────────────────────────────────────────
 //
@@ -101,6 +146,95 @@ async function waitForProofServer(maxAttempts = 60, delayMs = 2000): Promise<boo
     }
   }
   return false;
+}
+
+// ─── Bounded waits for the DUST setup ─────────────────────────────────────────
+//
+// The DUST block below contains two unbounded waits that can hang the deploy
+// right after a successful sync:
+//
+//   1. Re-reading the facade state gated on FacadeState.isSynced. That getter
+//      requires STRICT completion (applyLag === 0, connected) of all three
+//      children at the same emission (wallet-sdk-facade). The sync step above
+//      already tolerated a bounded gap per child (waitForSyncedState(50)); if a
+//      child keeps a small permanent gap (the known public-network dust-decode
+//      issue discussed in wallet.ts) or drops its RPC/WS connection, isSynced
+//      stays false forever and firstValueFrom never resolves.
+//
+//   2. Awaiting dust.balance(new Date()) > 0n. The DUST balance is a wall-clock
+//      projection computed only when the wallet state observable emits, and
+//      wallet.state() has no periodic tick — durable emissions stop on a quiet
+//      wallet — so the filter can never pass. The SDK's own
+//      DustWallet.waitForGeneratedDust solves this with a 1s timer tick.
+//
+// Every wait on this path gets a bounded budget (DUST_SETUP_TIMEOUT_MS, default
+// 10 minutes); on expiry we report a clear diagnostic instead of hanging
+// forever. We never fabricate a DUST balance and never bypass the DUST
+// requirement — we only make the failure loud and actionable.
+
+const DEFAULT_DUST_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
+
+function resolveDustSetupTimeoutMs(): number {
+  const raw = process.env.DUST_SETUP_TIMEOUT_MS;
+  if (raw === undefined || raw === '') return DEFAULT_DUST_SETUP_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(
+      `Invalid DUST_SETUP_TIMEOUT_MS "${raw}" — must be a positive number of milliseconds.`,
+    );
+  }
+  return parsed;
+}
+
+class DustSetupTimeoutError extends Error {
+  constructor(timeoutMs: number, detail: string) {
+    super(`Timed out during DUST setup after ${Math.round(timeoutMs / 1000)}s.\n  ${detail}`);
+    this.name = 'DustSetupTimeoutError';
+  }
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, detail: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new DustSetupTimeoutError(timeoutMs, detail)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+function formatChildProgress(label: string, progress: any): string {
+  if (!progress) return `${label}: n/a`;
+  const applied = progress.appliedIndex ?? progress.appliedId ?? '?';
+  const highest = progress.highestRelevantWalletIndex ?? progress.highestTransactionId ?? '?';
+  return (
+    `${label}: applied=${String(applied)} highest=${String(highest)} ` +
+    `connected=${progress.isConnected ?? false} strict=${progress.isStrictlyComplete?.() ?? false}`
+  );
+}
+
+/**
+ * Best-effort snapshot of the current DUST projection and per-child sync state,
+ * for the diagnostic shown when a bounded DUST wait expires.
+ */
+async function describeWalletState(walletCtx: WalletContext): Promise<string> {
+  try {
+    const s: any = await Rx.firstValueFrom(
+      (walletCtx.wallet as any).state().pipe(Rx.timeout({ first: 15_000 })),
+    );
+    return [
+      `  DUST projection now: ${s.dust.balance(new Date()).toLocaleString()}`,
+      formatChildProgress('  shielded', s.shielded?.state?.progress),
+      formatChildProgress('  unshielded', s.unshielded?.progress),
+      formatChildProgress('  dust', s.dust?.state?.progress),
+    ].join('\n');
+  } catch {
+    return '  (could not read latest wallet state)';
+  }
 }
 
 // ─── Compiled contract loading ─────────────────────────────────────────────────
@@ -200,7 +334,7 @@ async function main() {
     const elapsed = Math.round((Date.now() - syncStart) / 1000);
     process.stdout.write(`\r  ⏳ Still syncing... (${elapsed}s elapsed)   `);
   }, 5000);
-  const state = await walletCtx.wallet.waitForSyncedState();
+  const state = await waitForSyncedStateWithProgress(network, walletCtx);
   clearInterval(syncInterval);
   process.stdout.write('\r  ✓ Synced with network.                                      \n');
 
@@ -263,35 +397,96 @@ async function main() {
 
   // Register for DUST.
   console.log('─── DUST Token Setup ───────────────────────────────────────────\n');
-  const dustState = await Rx.firstValueFrom(walletCtx.wallet.state().pipe(Rx.filter((s) => s.isSynced)));
+  const dustSetupTimeoutMs = resolveDustSetupTimeoutMs();
+
+  // The sync step above already confirmed all children are caught up (tolerant
+  // per-child gap). Read the latest cached state here instead of re-gating on
+  // the facade's strict isSynced, which can never become true when a child has
+  // a persistent small gap and would otherwise block forever. The 15s guard
+  // still turns a wedged wallet observable into a clear error.
+  let dustState: any;
+  try {
+    dustState = await withTimeout(
+      Rx.firstValueFrom((walletCtx.wallet as any).state().pipe(Rx.timeout({ first: 15_000 }))),
+      dustSetupTimeoutMs,
+      'Could not read the latest wallet state before DUST registration.',
+    );
+  } catch (err) {
+    if (err instanceof DustSetupTimeoutError) {
+      console.error(`\n❌ ${err.message}`);
+      await walletCtx.wallet.stop();
+      process.exit(1);
+    }
+    throw err;
+  }
 
   const unregisteredUtxos = dustState.unshielded.availableCoins.filter(
     (c: any) => !c.meta?.registeredForDustGeneration,
   );
   if (unregisteredUtxos.length > 0) {
     console.log(`  Registering ${unregisteredUtxos.length} NIGHT UTXOs for DUST generation...`);
-    // The signDustRegistration callback (3rd arg) already produces a recipe
-    // with N signatures matching N inputs. Do NOT call signRecipe again — that
-    // would double-sign and the chain rejects with InputsSignaturesLengthMismatch
-    // (Custom error 192). Matches upstream example-counter and example-bboard.
-    const recipe = await walletCtx.wallet.registerNightUtxosForDustGeneration(
-      unregisteredUtxos,
-      walletCtx.unshieldedKeystore.getPublicKey(),
-      (payload) => walletCtx.unshieldedKeystore.signData(payload),
-    );
-    const finalized = await walletCtx.wallet.finalizeRecipe(recipe);
-    await walletCtx.wallet.submitTransaction(finalized);
+    try {
+      await withTimeout(
+        (async () => {
+          // The signDustRegistration callback (3rd arg) already produces a recipe
+          // with N signatures matching N inputs. Do NOT call signRecipe again — that
+          // would double-sign and the chain rejects with InputsSignaturesLengthMismatch
+          // (Custom error 192). Matches upstream example-counter and example-bboard.
+          const recipe = await walletCtx.wallet.registerNightUtxosForDustGeneration(
+            unregisteredUtxos,
+            walletCtx.unshieldedKeystore.getPublicKey(),
+            (payload) => walletCtx.unshieldedKeystore.signData(payload),
+          );
+          const finalized = await walletCtx.wallet.finalizeRecipe(recipe);
+          await walletCtx.wallet.submitTransaction(finalized);
+        })(),
+        dustSetupTimeoutMs,
+        `Registering ${unregisteredUtxos.length} NIGHT UTXOs for DUST generation did not complete. ` +
+          'This usually means the proof server (npm run proof-server:start) is down or the ' +
+          'registration transaction was not accepted on-chain.',
+      );
+      console.log('  DUST registration submitted.');
+    } catch (err) {
+      if (err instanceof DustSetupTimeoutError) {
+        console.error(`\n❌ ${err.message}`);
+        console.error('  The wallet state is preserved; re-run setup once the proof server is healthy.\n');
+        await walletCtx.wallet.stop();
+        process.exit(1);
+      }
+      throw err;
+    }
   }
 
+  // Wait for the wall-clock DUST projection to exceed zero. This must re-run on
+  // a periodic tick: wallet.state() does not re-emit on a quiet wallet, so the
+  // projection would never be recomputed and the wait would hang forever. The
+  // wait requires the projected DUST to actually appear (never fabricated) and
+  // is bounded so a stuck generation (e.g. the registration tx never landing)
+  // fails loudly instead of silently running for an hour.
   if (dustState.dust.balance(new Date()) === 0n) {
     console.log('  Waiting for DUST tokens...');
-    await Rx.firstValueFrom(
-      walletCtx.wallet.state().pipe(
-        Rx.throttleTime(5000),
-        Rx.filter((s) => s.isSynced),
-        Rx.filter((s) => s.dust.balance(new Date()) > 0n),
-      ),
-    );
+    try {
+      await withTimeout(
+        Rx.firstValueFrom(
+          Rx.combineLatest([(walletCtx.wallet as any).state(), Rx.timer(0, 1000)]).pipe(
+            Rx.filter(([s]: [any]) => s.dust.balance(new Date()) > 0n),
+          ),
+        ),
+        dustSetupTimeoutMs,
+        `DUST tokens never became available within ${dustSetupTimeoutMs / 60_000} min. ` +
+          'If a registration was submitted above it may not have landed, or the wallet is ' +
+          'disconnected from the indexer. The block below shows the latest state.',
+      );
+    } catch (err) {
+      if (err instanceof DustSetupTimeoutError) {
+        console.error(`\n❌ ${err.message}`);
+        console.error(await describeWalletState(walletCtx));
+        console.error('\n  The wallet state is preserved; re-run setup to retry.\n');
+        await walletCtx.wallet.stop();
+        process.exit(1);
+      }
+      throw err;
+    }
   }
   console.log('  DUST tokens ready!\n');
 
@@ -330,12 +525,13 @@ async function main() {
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      // The constructor's sole argument is the eligibility threshold. The
-      // private `propertyValue` witness is not exercised at deploy time —
-      // only the checkEligibility circuit (called later) consumes it.
+      // The constructor takes the eligibility threshold and the designated
+      // officer DApp public key. The private witnesses (propertyValue, secret
+      // keys) are not exercised at deploy time — only the later registration /
+      // eligibility circuits consume them.
       deployed = await deployContract(providers, {
         compiledContract: CompiledPriestateContract as any,
-        args: [THRESHOLD],
+        args: [THRESHOLD, OFFICER],
         privateStateId: PRIVATE_STATE_ID,
         initialPrivateState: createPriestatePrivateState(),
       });
@@ -374,7 +570,7 @@ async function main() {
       }
 
       if (isDustShortage) {
-        const currentState = await walletCtx.wallet.waitForSyncedState();
+        const currentState = await waitForSyncedStateWithProgress(network, walletCtx);
         const dustBalance = currentState.dust.balance(new Date());
         if (attempt < MAX_RETRIES) {
           if (attempt === 1) {

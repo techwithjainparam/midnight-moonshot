@@ -111,11 +111,13 @@ export async function createWallet(opts: CreateWalletOptions): Promise<WalletCon
     indexerClientConnection: {
       indexerHttpUrl: opts.networkConfig.indexer,
       indexerWsUrl: opts.networkConfig.indexerWS,
+      bufferSize: 50_000,
     },
     provingServerUrl: new URL(opts.networkConfig.proofServer),
     relayURL: new URL(opts.networkConfig.node.replace(/^http/, 'ws')),
     txHistoryStorage: new NoOpTransactionHistoryStorage(),
     costParameters: { additionalFeeOverhead: 300_000_000_000_000n, feeBlocksMargin: 5 },
+    batchUpdates: { size: 50, timeout: 10, spacing: 1 },
   };
 
   const wallet = await WalletFacade.init({
@@ -234,10 +236,51 @@ function normalizeProgress(childState: any): ChildSyncProgress {
   return { appliedIndex, highestRelevant, isConnected: p.isConnected ?? false };
 }
 
+// The wallet SDK's Effect-based internals call Console.error (which delegates
+// to the global console.error) on every recoverable RPC disconnect during
+// sync, producing a flood of "Wallet.Sync: [object Object]" lines.  The SDK
+// auto-retries these errors, so they are not fatal.  We suppress the noisy
+// output during sync by temporarily patching console.error.
+
+const _originalConsoleError = console.error.bind(console);
+
+/** True when we are actively suppressing recoverable sync error output. */
+let _suppressingSyncErrors = false;
+
+function _patchedConsoleError(...args: unknown[]): void {
+  if (_suppressingSyncErrors) {
+    // Render the first argument to a string for pattern matching.
+    const first = args[0];
+    const head = typeof first === 'string' ? first : String(first);
+    // Filter out recoverable Wallet.Sync error spam from the wallet SDK.
+    if (head.includes('Wallet.Sync')) return;
+  }
+  _originalConsoleError(...args);
+}
+
+function enableSyncErrorSuppression(): void {
+  _suppressingSyncErrors = true;
+  console.error = _patchedConsoleError;
+}
+
+function disableSyncErrorSuppression(): void {
+  _suppressingSyncErrors = false;
+  console.error = _originalConsoleError;
+}
+
 /**
  * Wait for the wallet facade to reach a fully synced state while reporting
  * per-child progress at a configurable interval. Resolves with the final
  * FacadeState once all children report complete.
+ *
+ * Uses each child wallet's SDK-supported {@link waitForSyncedState(allowedGap)}
+ * rather than the facade-level `isSynced` getter. The facade's `isSynced`
+ * requires `isStrictlyComplete()` (gap === 0) on all three children
+ * simultaneously. On preprod, some historical dust events fail to decode,
+ * leaving the dust child with a small permanent gap that prevents strict
+ * completion. The per-child `waitForSyncedState(allowedGap)` uses the SDK's
+ * `isCompleteWithin(allowedGap)` check, which tolerates a bounded gap while
+ * still requiring `isConnected`.
  */
 export async function waitForSyncedStateWithProgress(
   _network: NetworkId,
@@ -249,17 +292,27 @@ export async function waitForSyncedStateWithProgress(
   let lastApplied = { shielded: -1n, unshielded: -1n, dust: -1n };
   let stalledCount = 0;
 
+  enableSyncErrorSuppression();
+
   return new Promise<any>((resolve, reject) => {
     let reportTimer: ReturnType<typeof setInterval> | undefined;
-    let subscription: Rx.Subscription | undefined;
+    let stateCacheSub: Rx.Subscription | undefined;
+    let latestState: any = undefined;
 
     const cleanup = () => {
       if (reportTimer) clearInterval(reportTimer);
-      if (subscription) subscription.unsubscribe();
+      if (stateCacheSub) stateCacheSub.unsubscribe();
+      disableSyncErrorSuppression();
     };
 
+    // Cache the latest FacadeState from the wallet's observable so the
+    // progress timer can read it synchronously without ._state?.getValue?().
+    stateCacheSub = (ctx.wallet as any).state().subscribe((s: any) => {
+      latestState = s;
+    });
+
     reportTimer = setInterval(() => {
-      const state = (ctx.wallet as any)._state?.getValue?.();
+      const state = latestState;
       if (!state) return;
 
       const shielded = normalizeProgress(state.shielded);
@@ -290,19 +343,31 @@ export async function waitForSyncedStateWithProgress(
       });
     }, reportIntervalMs);
 
-    // Subscribe to wallet state; resolve once isSynced flips to true.
-    subscription = (ctx.wallet as any).state().pipe(
-      Rx.filter((s: any) => s.isSynced),
-      Rx.take(1),
-    ).subscribe({
-      next: (finalState: any) => {
-        cleanup();
-        resolve(finalState);
-      },
-      error: (err: unknown) => {
-        cleanup();
-        reject(err);
-      },
+    // Each child wallet exposes waitForSyncedState(allowedGap) which uses the
+    // SDK's isCompleteWithin(allowedGap) — requiring isConnected AND a bounded
+    // apply-lag. This avoids the facade-level isSynced getter that demands
+    // isStrictlyComplete (gap === 0) on all three children simultaneously.
+    //
+    // ALLOWED_GAP = 50 events (matches the SDK's default isCompleteWithin
+    // tolerance). On preprod, historical dust events may fail to decode and
+    // the unshielded wallet can show appliedId exceeding highestTransactionId
+    // by ~30. Fifty covers all observed gaps while staying within the SDK's
+    // designed non-strict completion tolerance.
+    const ALLOWED_GAP = 50n;
+
+    Promise.all([
+      ctx.wallet.shielded.waitForSyncedState(ALLOWED_GAP),
+      ctx.wallet.unshielded.waitForSyncedState(ALLOWED_GAP),
+      ctx.wallet.dust.waitForSyncedState(ALLOWED_GAP),
+    ]).then(async () => {
+      // All children are synced within the allowed gap. Retrieve the final
+      // combined FacadeState from the wallet observable.
+      const finalState = await Rx.firstValueFrom((ctx.wallet as any).state());
+      cleanup();
+      resolve(finalState);
+    }).catch((err: unknown) => {
+      cleanup();
+      reject(err);
     });
   });
 }

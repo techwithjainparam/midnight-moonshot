@@ -39,7 +39,11 @@ export class BrowserPriestateManager {
 
   readonly deployments$: Observable<Array<Observable<PriestateDeployment>>> = this.#deploymentsSubject;
 
-  resolve(contractAddress?: ContractAddress, eligibilityThreshold?: bigint): Observable<PriestateDeployment> {
+  resolve(
+    contractAddress?: ContractAddress,
+    eligibilityThreshold?: bigint,
+    designatedOfficer?: Uint8Array,
+  ): Observable<PriestateDeployment> {
     // Fixed-address wiring: verification must join the already-deployed
     // contract — an explicit address, VITE_DEFAULT_CONTRACT, or the
     // network-matched deployment recorded by `npm run deploy`. Only when no
@@ -60,7 +64,14 @@ export class BrowserPriestateManager {
       if (eligibilityThreshold === undefined) {
         throw new Error('Eligibility threshold is required when deploying a new PRIESTATE contract.');
       }
-      void this.run(deployment, (providers) => PriestateAPI.deploy(providers, eligibilityThreshold, this.logger));
+      if (designatedOfficer === undefined) {
+        throw new Error(
+          'A designated officer key is required when deploying a new PRIESTATE contract.',
+        );
+      }
+      void this.run(deployment, (providers) =>
+        PriestateAPI.deploy(providers, eligibilityThreshold, designatedOfficer as Uint8Array, this.logger),
+      );
     }
     this.#deploymentsSubject.next([...deployments, deployment]);
     return deployment;
