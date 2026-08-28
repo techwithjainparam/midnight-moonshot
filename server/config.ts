@@ -37,6 +37,16 @@ export interface ServerConfig {
     readonly mobileLinkPath: string;
     readonly timeoutMs: number;
   };
+  readonly registry: {
+    /**
+     * Server-side officer credential for the registry metadata API. It is a
+     * plain (non-VITE_*) env var that never reaches the browser bundle and is
+     * never logged. Empty ⇒ the registry API is `unavailable` (fail closed).
+     * This is a SEPARATE boundary from the on-chain officer check and from
+     * the DEMO frontend role gate.
+     */
+    readonly officerToken: string;
+  };
 }
 
 function intEnv(name: string, fallback: number): number {
@@ -87,6 +97,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       mobileLinkPath:
         env.AADHAAR_KYC_MOBILE_LINK_PATH?.trim() ?? '/api/v1/mobile-to-aadhaar/',
       timeoutMs: intEnv('AADHAAR_KYC_TIMEOUT_MS', 20000),
+    },
+    registry: {
+      officerToken: env.REGISTRY_OFFICER_API_TOKEN ?? '',
     },
   };
 }

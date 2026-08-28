@@ -13,6 +13,27 @@
 //   * POST /api/v1/aadhaar-mobile/complete
 //   * GET  /api/health                 → capability report for the UI.
 //
+// Registry metadata API (application/officer support — see server/registry):
+//   * POST /api/v1/officer/applications   → authorized officer catalogues
+//                                            metadata referencing an on-chain
+//                                            registration (NO verdict, no
+//                                            property VALUE, no secrets).
+//   * GET  /api/v1/officer/applications   → list catalogued metadata.
+//   * GET  /api/v1/officer/applications/:id
+//   * POST /api/v1/applications            → applicant persists ONLY safe public
+//                                            metadata referencing a real on-chain
+//                                            registration id, without the officer
+//                                            credential (grants no officer
+//                                            privilege; no verdict, no property
+//                                            VALUE, no secrets).
+//
+// The registry routes are an ADDITIONAL server-side officer boundary (Bearer
+// REGISTRY_OFFICER_API_TOKEN) for officer operations. The applicant route above
+// is a separate, lower-privilege intake that never touches the officer
+// credential. None of them fabricate an on-chain verdict or store the
+// confidential property VALUE; the Midnight contract remains the source of
+// truth for on-chain status.
+//
 // Hard rules enforced across every route:
 //   * OTPs are generated and checked ONLY here; raw codes are never
 //     stored unhashed, never logged, never returned in any response.
@@ -35,12 +56,19 @@ import { SmtpEmailContactProvider } from './services/contact-provider';
 import { kycProviderFromConfig } from './services/identity-provider';
 import type { IdentityVerificationProvider } from './services/identity-provider-types';
 import { normalizeEmail } from './lib/validation';
+import { RegistryService } from './registry/service';
+import type { RegistryStore } from './registry/store';
+import { InMemoryRegistryStore } from './registry/store';
 
 export interface VerificationServerOverrides {
   /** Test seam: replace SMTP delivery with a capture transport. */
   readonly mailer?: Mailer;
   /** Test seam: replace the Aadhaar KYC adapter wholesale. */
   readonly aadhaarProvider?: IdentityVerificationProvider | null;
+  /** Test seam: replace the registry metadata persistence backend. */
+  readonly registryStore?: RegistryStore;
+  /** Test seam: override the server-side officer credential for registry ops. */
+  readonly registryOfficerToken?: string;
 }
 
 const DEV_FALLBACK_OTP_SECRET =
@@ -82,6 +110,15 @@ export function createVerificationServer(
           mobileLinkPath: config.aadhaarKyc.mobileLinkPath,
           timeoutMs: config.aadhaarKyc.timeoutMs,
         });
+
+  // Registry metadata API: an ADDITIONAL server-side officer boundary (see
+  // server/registry/service.ts). The officer credential is a non-VITE_* env
+  // var; empty ⇒ the feature reports `unavailable` (fail closed).
+  const registryStore: RegistryStore = overrides.registryStore ?? new InMemoryRegistryStore();
+  const registryService = new RegistryService({
+    store: registryStore,
+    officerToken: overrides.registryOfficerToken ?? config.registry.officerToken,
+  });
 
   const emailSendIpLimiter = new RateLimiter({
     maxEvents: config.otp.maxSendsPerIpPerHour,
@@ -156,10 +193,17 @@ export function createVerificationServer(
     return typeof v === 'string' ? v : '';
   }
 
+  /** Extract a `Bearer <token>` from an Authorization header ('' when absent). */
+  function bearerToken(header: string | undefined): string {
+    if (!header) return '';
+    const m = /^Bearer\s+(.+)$/i.exec(header.trim());
+    return m ? m[1].trim() : '';
+  }
+
   function unavailableResponse(feature: 'email' | 'aadhaar'): { error: 'unavailable'; message: string } {
     return feature === 'email'
       ? { error: 'unavailable', message: 'Verification service unavailable.' }
-      : { error: 'unavailable', message: 'Aadhaar-linked mobile verification is currently unavailable.' };
+      : { error: 'unavailable', message: 'Aadhaar-linked mobile verification is not available in this demo.' };
   }
 
   // ── Routes ─────────────────────────────────────────────────────────
@@ -181,9 +225,52 @@ export function createVerificationServer(
         capabilities: {
           emailOtp: emailProvider.configured,
           aadhaarMobile: aadhaarProvider?.available === true,
+          registry: registryService.available,
         },
         aadhaarProvider: aadhaarProvider?.available === true ? aadhaarProvider.name : null,
       });
+      return;
+    }
+
+    // Registry metadata API (server-side officer boundary). Supports GET and
+    // POST, all guarded by a server-side officer credential.
+    if (url.startsWith('/api/v1/officer/applications')) {
+      const rest = url.slice('/api/v1/officer/applications'.length);
+      const token = bearerToken(req.headers.authorization);
+      if (req.method === 'POST' && rest === '') {
+        const body = await readJson(req);
+        if (body === null) {
+          sendJson(res, 400, { error: 'invalid-body' });
+          return;
+        }
+        routeRegistryCreate(res, token, body);
+        return;
+      }
+      if (req.method === 'GET' && rest === '') {
+        routeRegistryList(res, token);
+        return;
+      }
+      const match = /^\/([^/]+)\/?$/.exec(rest);
+      if (req.method === 'GET' && match) {
+        routeRegistryGet(res, token, decodeURIComponent(match[1]));
+        return;
+      }
+      sendJson(res, 404, { error: 'not-found' });
+      return;
+    }
+
+    // Applicant registry metadata intake. Distinct from the officer boundary:
+    // an applicant persists ONLY safe public metadata referencing a real
+    // on-chain registration id after a successful submission, WITHOUT the
+    // server-side officer credential (which never reaches the browser). No
+    // officer privilege is granted and a verdict can never be asserted.
+    if (req.method === 'POST' && url === '/api/v1/applications') {
+      const body = await readJson(req);
+      if (body === null) {
+        sendJson(res, 400, { error: 'invalid-body' });
+        return;
+      }
+      routeRegistryApplicantCreate(res, body);
       return;
     }
 
@@ -349,6 +436,95 @@ export function createVerificationServer(
       ...(result.mode === 'verified' ? { receipt: result.receipt } : {}),
       ...(result.mode === 'not-linked' ? { message: result.message } : {}),
     });
+  }
+
+  // ── Registry metadata routes (server-side officer boundary) ────────────
+
+  function sendRegistryError(
+    res: http.ServerResponse,
+    reason: string,
+  ): void {
+    switch (reason) {
+      case 'unavailable':
+        sendJson(res, 503, {
+          ok: false,
+          reason: 'unavailable',
+          message: 'Registry API unavailable.',
+        });
+        return;
+      case 'unauthorized':
+        sendJson(res, 401, {
+          ok: false,
+          reason: 'unauthorized',
+          message: 'Officer authorization required.',
+        });
+        return;
+      case 'invalid-input':
+        sendJson(res, 400, { ok: false, reason: 'invalid-input' });
+        return;
+      case 'forbidden-field':
+        sendJson(res, 400, { ok: false, reason: 'forbidden-field' });
+        return;
+      case 'not-found':
+        sendJson(res, 404, { ok: false, reason: 'not-found' });
+        return;
+      default:
+        sendJson(res, 500, { ok: false, reason: 'internal' });
+    }
+  }
+
+  async function routeRegistryCreate(
+    res: http.ServerResponse,
+    token: string,
+    body: JsonBody,
+  ): Promise<void> {
+    const result = registryService.ingest(token, body);
+    if (!result.ok) {
+      sendRegistryError(res, result.reason);
+      return;
+    }
+    if (!('item' in result)) return sendRegistryError(res, 'internal');
+    sendJson(res, 201, { ok: true, application: result.item });
+  }
+
+  /**
+   * Applicant endpoint: persist safe public metadata referencing a real
+   * on-chain registration. No officer credential is required or used — this is
+   * NOT the officer boundary. Validation is identical and strict, on-chain
+   * status remains authoritative, and the response never carries a verdict or
+   * the property VALUE.
+   */
+  async function routeRegistryApplicantCreate(
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): Promise<void> {
+    const result = registryService.ingestApplicant(body);
+    if (!result.ok) {
+      sendRegistryError(res, result.reason);
+      return;
+    }
+    if (!('item' in result)) return sendRegistryError(res, 'internal');
+    sendJson(res, 201, { ok: true, application: result.item });
+  }
+
+  function routeRegistryList(res: http.ServerResponse, token: string): void {
+    const result = registryService.list(token);
+    if (!result.ok) {
+      sendRegistryError(res, result.reason);
+      return;
+    }
+    if (!('items' in result)) return sendRegistryError(res, 'internal');
+    sendJson(res, 200, { ok: true, applications: result.items });
+  }
+
+  function routeRegistryGet(res: http.ServerResponse, token: string, id: string): void {
+    const result = registryService.get(token, id);
+    if (!result.ok) {
+      sendRegistryError(res, result.reason);
+      return;
+    }
+    if (!('item' in result)) return sendRegistryError(res, 'internal');
+    sendJson(res, 200, { ok: true, application: result.item });
   }
 
   const server = http.createServer((req, res) => {
