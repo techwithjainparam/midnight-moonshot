@@ -31,6 +31,42 @@ Only the eligibility result is disclosed publicly on the ledger. The property va
 | On-chain result capture & display | Done |
 | Production build | Done |
 
+## Deployment
+
+The **PRIESTATE Compact contract** is deployed on the **Midnight Preprod** network:
+
+* **Network:** Midnight Preprod
+* **Deployed Contract Address:** `e5bddf519efe1ed61bf59c344e49c37340860fb99a60543056e97456224b5256`
+
+This is the deployed **PRIESTATE Compact** smart contract. The frontend joins this exact address on the Preprod network, and the property eligibility flow runs against this on-chain contract.
+
+## Privacy Model
+
+PRIESTATE is built around a clear separation of what is public and what stays private.
+
+### PUBLIC
+
+The following is disclosed publicly on the Midnight ledger:
+
+* The sealed **eligibility threshold** (`eligibilityThreshold`).
+* The **designated officer** public key (`officer`).
+* The **registration counter** and the **registry map** (`owner` binding, `area`, `status`, `district`, timestamps, reviewer).
+* The Boolean **eligibility result** (`eligibilityResult`) — the final pass/fail verdict.
+
+### PRIVATE
+
+The **property value** (`propertyValue`) and the relevant private secrets — the applicant secret key and the officer secret key — remain private. They are used only inside the zero-knowledge circuit and are never written to the ledger.
+
+### PROVES WITHOUT REVEALING
+
+A user **proves** `propertyValue >= eligibilityThreshold` **without revealing the actual property value**. Only the eligibility result (true/false) becomes public on the ledger; the underlying property value stays private forever.
+
+## Demo Video
+
+A short walkthrough video demonstrating the PRIESTATE eligibility flow on Midnight Preprod will be added here.
+
+_Demo video link (placeholder — to be added)._
+
 ## Smart Contract
 
 `contracts/priestate.compact`:

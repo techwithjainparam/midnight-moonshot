@@ -32,6 +32,8 @@ import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config
 import { resolveNetwork, getOrCreateWallet, formatWalletBackupNotice, recordDeployment } from './network';
 import { createWallet, persistWalletState, unshieldedToken, waitForSyncedStateWithProgress, type WalletContext } from './wallet';
 import { CompiledPriestateContract, createPriestatePrivateState } from './contract/index.js';
+import { retryWithBackoff, DEFAULT_DUST_RETRY_ATTEMPTS } from './dust-registration';
+import { readLatestWalletState, readTNightBalance } from './faucet-funding';
 
 // @ts-expect-error Required for wallet sync
 globalThis.WebSocket = WebSocket;
@@ -359,11 +361,18 @@ async function main() {
   // funds the address from the network's faucet. The display balance is
   // authoritative here (unlike DUST, tNIGHT shows up immediately once the
   // faucet tx lands).
+  //
+  // NOTE: Never gate these reads on the facade's strict `isSynced`. That
+  // getter requires all three child wallets to be strictly complete
+  // (applyLag === 0) at the same emission; on preprod a child can keep a small
+  // permanent gap, so `isSynced` never becomes true and a filter-gated read
+  // blocks forever (the pre-deploy hang seen in the field). The sync step
+  // above already used the tolerant per-child `waitForSyncedState(allowedGap)`
+  // approach; the snapshot it produced is authoritative for the initial check,
+  // and each poll re-reads the latest state with a bounded timeout instead of
+  // re-gating on `isSynced`.
   if (network !== 'undeployed' && networkConfig.faucet) {
-    const initialBalance = await Rx.firstValueFrom(walletCtx.wallet.state().pipe(
-      Rx.filter((s) => s.isSynced),
-    ));
-    const initialTNight = initialBalance.unshielded.balances[unshieldedToken().raw] ?? 0n;
+    const initialTNight = state.unshielded.balances[unshieldedToken().raw] ?? 0n;
     if (initialTNight === 0n) {
       console.log('─── Fund Wallet ────────────────────────────────────────────────\n');
       console.log(`  Wallet address: ${address}`);
@@ -375,8 +384,8 @@ async function main() {
       const start = Date.now();
       while (true) {
         await new Promise((r) => setTimeout(r, 10_000));
-        const s = await Rx.firstValueFrom(walletCtx.wallet.state().pipe(Rx.filter((x) => x.isSynced)));
-        const tn = s.unshielded.balances[unshieldedToken().raw] ?? 0n;
+        const s = await readLatestWalletState(walletCtx.wallet);
+        const tn = s.ok ? readTNightBalance(s.state, unshieldedToken().raw) : 0n;
         if (tn > 0n) {
           console.log(`\n  Funded! tNIGHT balance: ${tn.toLocaleString()}\n`);
           break;
@@ -420,40 +429,73 @@ async function main() {
     throw err;
   }
 
-  const unregisteredUtxos = dustState.unshielded.availableCoins.filter(
+  // The Preprod public RPC is intermittently unstable during the DUST phase
+  // (drops the runtime-version subscription with close code 1000, or times out
+  // an RPC call in the 60s window), surfacing recoverable Wallet.Sync errors.
+  // Those are transient and safe to retry with bounded exponential backoff.
+  // Non-transient failures fail immediately, and retries never run forever.
+  //
+  // Each attempt re-reads the current unregistered-UTXO set so a registration
+  // that the SDK actually submitted (despite throwing) is never blindly
+  // re-submitted, and each attempt is wrapped in its own per-attempt timeout so
+  // a hung RPC call cannot stall the whole retry.
+  const refreshUnregisteredUtxos = async (): Promise<any[]> => {
+    try {
+      const s: any = await Rx.firstValueFrom(
+        (walletCtx.wallet as any).state().pipe(Rx.timeout({ first: 15_000 })),
+      );
+      return s.unshielded.availableCoins.filter((c: any) => !c.meta?.registeredForDustGeneration);
+    } catch {
+      // If we cannot read a fresh state, fall back to the snapshot captured
+      // just before the retry loop began (still safe: idempotent re-check).
+      return dustStateUnregisteredUtxosSnapshot;
+    }
+  };
+
+  const dustStateUnregisteredUtxosSnapshot = dustState.unshielded.availableCoins.filter(
     (c: any) => !c.meta?.registeredForDustGeneration,
   );
-  if (unregisteredUtxos.length > 0) {
-    console.log(`  Registering ${unregisteredUtxos.length} NIGHT UTXOs for DUST generation...`);
-    try {
-      await withTimeout(
-        (async () => {
-          // The signDustRegistration callback (3rd arg) already produces a recipe
-          // with N signatures matching N inputs. Do NOT call signRecipe again — that
-          // would double-sign and the chain rejects with InputsSignaturesLengthMismatch
-          // (Custom error 192). Matches upstream example-counter and example-bboard.
-          const recipe = await walletCtx.wallet.registerNightUtxosForDustGeneration(
-            unregisteredUtxos,
-            walletCtx.unshieldedKeystore.getPublicKey(),
-            (payload) => walletCtx.unshieldedKeystore.signData(payload),
-          );
-          const finalized = await walletCtx.wallet.finalizeRecipe(recipe);
-          await walletCtx.wallet.submitTransaction(finalized);
-        })(),
-        dustSetupTimeoutMs,
-        `Registering ${unregisteredUtxos.length} NIGHT UTXOs for DUST generation did not complete. ` +
-          'This usually means the proof server (npm run proof-server:start) is down or the ' +
-          'registration transaction was not accepted on-chain.',
-      );
-      console.log('  DUST registration submitted.');
-    } catch (err) {
-      if (err instanceof DustSetupTimeoutError) {
-        console.error(`\n❌ ${err.message}`);
-        console.error('  The wallet state is preserved; re-run setup once the proof server is healthy.\n');
-        await walletCtx.wallet.stop();
-        process.exit(1);
-      }
-      throw err;
+  if (dustStateUnregisteredUtxosSnapshot.length > 0) {
+    console.log(`  Registering ${dustStateUnregisteredUtxosSnapshot.length} NIGHT UTXOs for DUST generation...`);
+    const result = await retryWithBackoff(
+      () =>
+        withTimeout(
+          (async () => {
+            // Refresh the current unregistered set before this attempt.
+            const current = await refreshUnregisteredUtxos();
+            if (current.length === 0) {
+              return 0;
+            }
+            // The signDustRegistration callback (3rd arg) already produces a
+            // recipe with N signatures matching N inputs. Do NOT call
+            // signRecipe again — that would double-sign and the chain rejects
+            // with InputsSignaturesLengthMismatch (Custom error 192). Matches
+            // upstream example-counter and example-bboard.
+            const recipe = await walletCtx.wallet.registerNightUtxosForDustGeneration(
+              current,
+              walletCtx.unshieldedKeystore.getPublicKey(),
+              (payload) => walletCtx.unshieldedKeystore.signData(payload),
+            );
+            const finalized = await walletCtx.wallet.finalizeRecipe(recipe);
+            await walletCtx.wallet.submitTransaction(finalized);
+            return current.length;
+          })(),
+          dustSetupTimeoutMs,
+          `Registering NIGHT UTXOs for DUST generation did not complete. ` +
+            'This usually means the proof server (npm run proof-server:start) is down or the ' +
+            'registration transaction was not accepted on-chain.',
+        ),
+      { maxAttempts: DEFAULT_DUST_RETRY_ATTEMPTS },
+    );
+    if (result.ok) {
+      if (result.value > 0) console.log('  DUST registration submitted.');
+    } else if (result.error instanceof DustSetupTimeoutError) {
+      console.error(`\n❌ ${result.error.message}`);
+      console.error('  The wallet state is preserved; re-run setup once the proof server is healthy.\n');
+      await walletCtx.wallet.stop();
+      process.exit(1);
+    } else {
+      throw result.error;
     }
   }
 
