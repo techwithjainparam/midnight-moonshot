@@ -31,6 +31,10 @@ Only the eligibility result is disclosed publicly on the ledger. The property va
 | On-chain result capture & display | Done |
 | Production build | Done |
 
+## Live Demo
+
+https://priestate.vercel.app
+
 ## Deployment
 
 The **PRIESTATE Compact contract** is deployed on the **Midnight Preprod** network:
