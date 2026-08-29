@@ -44,6 +44,10 @@ The **PRIESTATE Compact contract** is deployed on the **Midnight Preprod** netwo
 
 This is the deployed **PRIESTATE Compact** smart contract. The frontend joins this exact address on the Preprod network, and the property eligibility flow runs against this on-chain contract.
 
+### Deployment Proof
+
+![PRIESTATE Preprod Deployment Proof](screenshots/priestate-preprod-deployment-proof.png)
+
 ## Privacy Model
 
 PRIESTATE is built around a clear separation of what is public and what stays private.
