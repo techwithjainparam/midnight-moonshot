@@ -71,9 +71,7 @@ A user **proves** `propertyValue >= eligibilityThreshold` **without revealing th
 
 ## Demo Video
 
-A short walkthrough video demonstrating the PRIESTATE eligibility flow on Midnight Preprod will be added here.
-
-_Demo video link (placeholder — to be added)._
+https://youtu.be/UQwleyyFHqQ
 
 ## Smart Contract
 
