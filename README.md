@@ -1,5 +1,7 @@
 # midnight-moonshot
 
+[![CI](https://github.com/techwithjainparam/midnight-moonshot/actions/workflows/ci.yml/badge.svg)](https://github.com/techwithjainparam/midnight-moonshot/actions/workflows/ci.yml)
+
 Privacy-first dApp built on Midnight, evolving from a Compact smart contract to a production-ready Web3 application.
 
 ## PRIESTATE — Privacy-First Property Eligibility Proof
