@@ -47,6 +47,20 @@ export interface ServerConfig {
      */
     readonly officerToken: string;
   };
+  readonly account?: {
+    /**
+     * Server-only secret used to derive the AES key that encrypts account PII
+     * at rest. Missing/short ⇒ the account feature is `unavailable` (fail
+     * closed; PII is never persisted plainly).
+     */
+    readonly encryptionSecret: string;
+    /** True when a real SMS gateway is configured (else SMS OTP is unavailable). */
+    readonly smsConfigured: boolean;
+    /** True when a real WhatsApp gateway API is configured (else unavailable). */
+    readonly whatsappConfigured: boolean;
+    /** True when a real Google OAuth client is configured (else unavailable). */
+    readonly googleConfigured: boolean;
+  };
 }
 
 function intEnv(name: string, fallback: number): number {
@@ -89,6 +103,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       resendCooldownMs: intEnv('EMAIL_OTP_RESEND_COOLDOWN_SECONDS', 60) * 1000,
       maxSendsPerEmailPerHour: intEnv('EMAIL_OTP_MAX_SENDS_PER_HOUR', 5),
       maxSendsPerIpPerHour: intEnv('VERIFY_IP_MAX_SENDS_PER_HOUR', 20),
+    },
+    account: {
+      encryptionSecret: env.ACCOUNT_ENC_SECRET?.trim() ?? '',
+      smsConfigured: env.SMS_GATEWAY_PROVIDER?.trim() !== '',
+      whatsappConfigured: env.WHATSAPP_GATEWAY_API_TOKEN?.trim() !== '',
+      googleConfigured: env.GOOGLE_CLIENT_ID?.trim() !== '' && env.GOOGLE_CLIENT_SECRET?.trim() !== '',
     },
     aadhaarKyc: {
       providerName: env.AADHAAR_KYC_PROVIDER?.trim() ?? '',

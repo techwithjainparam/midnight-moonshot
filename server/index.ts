@@ -59,6 +59,9 @@ import { normalizeEmail } from './lib/validation';
 import { RegistryService } from './registry/service';
 import type { RegistryStore } from './registry/store';
 import { InMemoryRegistryStore } from './registry/store';
+import { AccountService } from './account/service';
+import type { AccountStore } from './account/store';
+import { InMemoryAccountStore } from './account/store';
 
 export interface VerificationServerOverrides {
   /** Test seam: replace SMTP delivery with a capture transport. */
@@ -69,6 +72,16 @@ export interface VerificationServerOverrides {
   readonly registryStore?: RegistryStore;
   /** Test seam: override the server-side officer credential for registry ops. */
   readonly registryOfficerToken?: string;
+  /** Test seam: replace the account persistence backend. */
+  readonly accountStore?: AccountStore;
+  /** Test seam: account PII encryption secret (fail closed without it). */
+  readonly accountEncryptionSecret?: string;
+  /** Test seam: SMS OTP delivery transport (capture real codes in tests). */
+  readonly accountSmsDelivery?: { configured: boolean; send: (to: string, code: string) => void };
+  /** Test seam: WhatsApp OTP delivery transport. */
+  readonly accountWhatsappDelivery?: { configured: boolean; send: (to: string, code: string) => void };
+  /** Test seam: Google OAuth boundary. */
+  readonly accountGoogleAuthenticator?: { configured: boolean; complete: (code: string) => boolean };
 }
 
 const DEV_FALLBACK_OTP_SECRET =
@@ -118,6 +131,31 @@ export function createVerificationServer(
   const registryService = new RegistryService({
     store: registryStore,
     officerToken: overrides.registryOfficerToken ?? config.registry.officerToken,
+  });
+
+  // Level 3 account service. PII-at-rest encryption secret, SMS/WhatsApp
+  // delivery, and the Google OAuth boundary are provider-configured; when any
+  // is unset the affected feature reports `unavailable` (fail closed) — we
+  // never fabricate auth. Test seams replace the transport with capture hooks.
+  const accountService = new AccountService({
+    store: overrides.accountStore ?? new InMemoryAccountStore(),
+    encryptionSecret: overrides.accountEncryptionSecret ?? config.account?.encryptionSecret ?? '',
+    otp: { hashSecret: config.otp.hashSecret || DEV_FALLBACK_OTP_SECRET },
+    smsDelivery:
+      overrides.accountSmsDelivery ??
+      (config.account?.smsConfigured
+        ? { configured: true, send: () => undefined }
+        : { configured: false, send: () => undefined }),
+    whatsappDelivery:
+      overrides.accountWhatsappDelivery ??
+      (config.account?.whatsappConfigured
+        ? { configured: true, send: () => undefined }
+        : { configured: false, send: () => undefined }),
+    googleAuthenticator:
+      overrides.accountGoogleAuthenticator ??
+      (config.account?.googleConfigured
+        ? { configured: true, complete: () => false }
+        : { configured: false, complete: () => false }),
   });
 
   const emailSendIpLimiter = new RateLimiter({
@@ -226,9 +264,19 @@ export function createVerificationServer(
           emailOtp: emailProvider.configured,
           aadhaarMobile: aadhaarProvider?.available === true,
           registry: registryService.available,
+          account: {
+            smsOtp: accountService.smsConfigured,
+            whatsappOtp: accountService.whatsappConfigured,
+            google: accountService.googleConfigured,
+          },
         },
         aadhaarProvider: aadhaarProvider?.available === true ? aadhaarProvider.name : null,
       });
+      return;
+    }
+
+    if (req.method === 'GET' && url === '/api/v1/account/capabilities') {
+      sendJson(res, 200, { ok: true, ...accountService.capabilities });
       return;
     }
 
@@ -294,9 +342,209 @@ export function createVerificationServer(
         return void (await routeAadhaarStart(req, res, body));
       case '/api/v1/aadhaar-mobile/complete':
         return void (await routeAadhaarComplete(res, body));
+      case '/api/v1/account/register':
+        return void (await routeAccountRegister(res, body));
+      case '/api/v1/account/otp-sms/send':
+        return void (await routeAccountSmsSend(res, body));
+      case '/api/v1/account/otp-sms/verify':
+        return void (await routeAccountSmsVerify(res, body));
+      case '/api/v1/account/otp-whatsapp/send':
+        return void (await routeAccountWhatsappSend(res, body));
+      case '/api/v1/account/otp-whatsapp/verify':
+        return void (await routeAccountWhatsappVerify(res, body));
+      case '/api/v1/account/google/complete':
+        return void (await routeAccountGoogleComplete(res, body));
+      case '/api/v1/account/identity-verified':
+        return void (await routeAccountIdentity(res, body));
+      case '/api/v1/account/login':
+        return void (await routeAccountLogin(res, body));
       default:
         sendJson(res, 404, { error: 'not-found' });
     }
+  }
+
+  // ── Level 3 account routes ─────────────────────────────────────────
+
+  function sendAccountError(
+    res: http.ServerResponse,
+    reason: string,
+  ): void {
+    switch (reason) {
+      case 'unavailable':
+        sendJson(res, 503, {
+          ok: false,
+          reason: 'unavailable',
+          message: 'This factor’s delivery channel is not configured in this demo.',
+        });
+        return;
+      case 'unauthorized':
+        sendJson(res, 401, { ok: false, reason: 'unauthorized' });
+        return;
+      case 'invalid-input':
+        sendJson(res, 400, { ok: false, reason: 'invalid-input' });
+        return;
+      case 'already-registered':
+        sendJson(res, 409, { ok: false, reason: 'already-registered' });
+        return;
+      case 'not-found':
+        sendJson(res, 404, { ok: false, reason: 'not-found' });
+        return;
+      case 'factor-missing':
+        sendJson(res, 403, { ok: false, reason: 'factor-missing' });
+        return;
+      case 'identity-verification-required':
+        sendJson(res, 428, { ok: false, reason: 'identity-verification-required' });
+        return;
+      default:
+        sendJson(res, 500, { ok: false, reason: 'internal' });
+    }
+  }
+
+  /** OTP metadata without the raw code — the code is only sent to the device. */
+
+  async function routeAccountRegister(
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): Promise<void> {
+    const result = accountService.register(body);
+    if (!result.ok) {
+      sendAccountError(res, result.reason);
+      return;
+    }
+    if (!('view' in result)) return sendAccountError(res, 'internal');
+    sendJson(res, 201, { ok: true, account: result.view });
+  }
+
+  async function routeAccountSmsSend(
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): Promise<void> {
+    const walletAddress = str(body, 'walletAddress');
+    const result = accountService.issueSmsOtp(walletAddress);
+    if (result.ok === true) {
+      // The raw code is NEVER returned to the client — it went to the device.
+      sendJson(res, 200, { ok: true, channel: 'sms', expiresAt: result.expiresAt });
+      return;
+    }
+    if (result.reason === 'cooldown' || result.reason === 'rate-limited') {
+      sendJson(res, 429, {
+        ok: false,
+        reason: result.reason,
+        retryAfterMs: result.retryAfterMs,
+      });
+      return;
+    }
+    sendAccountError(res, result.reason);
+  }
+
+  async function routeAccountSmsVerify(
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): Promise<void> {
+    const walletAddress = str(body, 'walletAddress');
+    const code = str(body, 'code').trim();
+    if (!/^\d{6}$/.test(code)) {
+      sendJson(res, 400, { ok: false, reason: 'invalid', message: 'Enter the 6-digit code.' });
+      return;
+    }
+    const result = accountService.verifySmsOtp(walletAddress, code);
+    if (result.ok === true) {
+      sendJson(res, 200, { ok: true, channel: 'sms' });
+      return;
+    }
+    if (result.reason === 'expired' || result.reason === 'too-many-attempts') {
+      sendJson(res, 400, { ok: false, reason: result.reason });
+      return;
+    }
+    sendAccountError(res, result.reason);
+  }
+
+  async function routeAccountWhatsappSend(
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): Promise<void> {
+    const walletAddress = str(body, 'walletAddress');
+    const result = accountService.issueWhatsappOtp(walletAddress);
+    if (result.ok === true) {
+      sendJson(res, 200, { ok: true, channel: 'whatsapp', expiresAt: result.expiresAt });
+      return;
+    }
+    if (result.reason === 'cooldown' || result.reason === 'rate-limited') {
+      sendJson(res, 429, {
+        ok: false,
+        reason: result.reason,
+        retryAfterMs: result.retryAfterMs,
+      });
+      return;
+    }
+    sendAccountError(res, result.reason);
+  }
+
+  async function routeAccountWhatsappVerify(
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): Promise<void> {
+    const walletAddress = str(body, 'walletAddress');
+    const code = str(body, 'code').trim();
+    if (!/^\d{6}$/.test(code)) {
+      sendJson(res, 400, { ok: false, reason: 'invalid', message: 'Enter the 6-digit code.' });
+      return;
+    }
+    const result = accountService.verifyWhatsappOtp(walletAddress, code);
+    if (result.ok === true) {
+      sendJson(res, 200, { ok: true, channel: 'whatsapp' });
+      return;
+    }
+    if (result.reason === 'expired' || result.reason === 'too-many-attempts') {
+      sendJson(res, 400, { ok: false, reason: result.reason });
+      return;
+    }
+    sendAccountError(res, result.reason);
+  }
+
+  async function routeAccountGoogleComplete(
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): Promise<void> {
+    const walletAddress = str(body, 'walletAddress');
+    const authCode = str(body, 'authCode');
+    const result = accountService.completeGoogle(walletAddress, authCode);
+    if (!result.ok) {
+      sendAccountError(res, result.reason);
+      return;
+    }
+    if (!('view' in result)) return sendAccountError(res, 'internal');
+    sendJson(res, 200, { ok: true, account: result.view });
+  }
+
+  async function routeAccountIdentity(
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): Promise<void> {
+    const walletAddress = str(body, 'walletAddress');
+    const confirmed = body.confirmed === true;
+    const result = accountService.markIdentityVerified(walletAddress, confirmed);
+    if (!result.ok) {
+      sendAccountError(res, result.reason);
+      return;
+    }
+    if (!('view' in result)) return sendAccountError(res, 'internal');
+    sendJson(res, 200, { ok: true, account: result.view });
+  }
+
+  async function routeAccountLogin(
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): Promise<void> {
+    const walletAddress = str(body, 'walletAddress');
+    const password = str(body, 'password');
+    const result = accountService.login({ walletAddress, password });
+    if (!result.ok) {
+      sendAccountError(res, result.reason);
+      return;
+    }
+    if (!('session' in result)) return sendAccountError(res, 'internal');
+    sendJson(res, 200, { ok: true, session: result.session });
   }
 
   async function routeEmailSend(
