@@ -30,3 +30,4 @@ midnight-level-db/
 
 # Vite cache
 .vite/
+.vercel

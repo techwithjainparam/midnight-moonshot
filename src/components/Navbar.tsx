@@ -37,6 +37,12 @@ export default function Navbar() {
               <Link to="/dashboard#my-properties" className="navbar-link">
                 My Properties
               </Link>
+              <NavLink to="/login" className={linkClass}>
+                Account
+              </NavLink>
+              <NavLink to="/identity-verification" className={linkClass}>
+                Verify Identity
+              </NavLink>
             </>
           )}
           {status === 'connected' && isOfficer && (

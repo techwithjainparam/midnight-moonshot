@@ -76,7 +76,7 @@ export class AccountService {
   private readonly store: AccountStore;
   private readonly smsOtp: OtpService;
   private readonly whatsappOtp: OtpService;
-  private readonly encryptionKey: Buffer;
+  private readonly encryptionKey: Buffer | null;
   private readonly smsDelivery: { configured: boolean; send: (to: string, code: string) => void };
   private readonly whatsappDelivery: { configured: boolean; send: (to: string, code: string) => void };
   private readonly googleAuthenticator: { configured: boolean; complete: (code: string) => boolean };
@@ -86,10 +86,10 @@ export class AccountService {
 
   constructor(options: AccountServiceOptions) {
     const enc = deriveEncryptionKey(options.encryptionSecret);
-    if (!enc.ok || !enc.key) {
-      throw new Error(`AccountService: ${enc.reason}`);
-    }
-    this.encryptionKey = enc.key;
+    // Missing/short encryption secret ⇒ the account feature is disabled
+    // (fails closed). We do NOT throw here: the verification server must keep
+    // serving the other endpoints even when accounts are unconfigured.
+    this.encryptionKey = enc.ok && enc.key ? enc.key : null;
     this.store = options.store ?? new InMemoryAccountStore();
     this.smsOtp = new OtpService({
       hashSecret: options.otp.hashSecret,
@@ -127,7 +127,7 @@ export class AccountService {
 
   /** True when the account feature has what it needs to function. */
   get available(): boolean {
-    return true; // construction fails closed if not configured
+    return this.encryptionKey !== null;
   }
 
   /** True when every external factor delivery channel is configured. */
@@ -140,6 +140,7 @@ export class AccountService {
     if (!parsed.ok) return { ok: false, reason: 'invalid-input' };
 
     const { input } = parsed;
+    if (!this.encryptionKey) return { ok: false, reason: 'unavailable' };
     if (!this.allFactorsConfigured) {
       return { ok: false, reason: 'unavailable' };
     }
@@ -154,12 +155,14 @@ export class AccountService {
       fullName: string;
       aadhaarNumber: string;
       addressOnAadhaar?: string;
+      pincode?: string;
       dateOfBirth: string;
       mobileE164: string;
     } = {
       fullName: input.fullName,
       aadhaarNumber: input.aadhaarNumber,
       addressOnAadhaar: input.addressOnAadhaar,
+      pincode: input.pincode,
       dateOfBirth: input.dateOfBirth,
       mobileE164: input.mobile,
     };
@@ -172,7 +175,6 @@ export class AccountService {
       piiCipherText: encryptPII(this.encryptionKey, pii),
       maskedMobile: (input.mobile as string).slice(0, 3) + '••••' + (input.mobile as string).slice(-2),
       maskedAadhaar: maskAadhaar(input.aadhaarNumber),
-      pincode: input.pincode,
       smsOtpVerified: false,
       whatsappOtpVerified: false,
       googleLinked: false,
@@ -329,6 +331,7 @@ export class AccountService {
   decryptPii(
     walletAddress: string,
   ): { ok: true; pii: AccountRecordPii } | { ok: false; reason: 'not-found' | 'unauthorized' } {
+    if (!this.encryptionKey) return { ok: false, reason: 'not-found' };
     const record = this.store.getByWallet(walletAddress);
     if (!record) return { ok: false, reason: 'not-found' };
     const pii = decryptPII(this.encryptionKey, record.piiCipherText) as AccountRecordPii | null;

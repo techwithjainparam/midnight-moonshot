@@ -15,6 +15,9 @@ import ResultPage from './pages/ResultPage';
 import DashboardPage from './pages/DashboardPage';
 import ContactVerificationPage from './pages/ContactVerificationPage';
 import OfficerPage from './pages/OfficerPage';
+import UserRegistrationPage from './pages/UserRegistrationPage';
+import LoginPage from './pages/LoginPage';
+import IdentityVerificationPage from './pages/IdentityVerificationPage';
 
 // Route visibility model:
 //
@@ -40,6 +43,9 @@ export default function App() {
         <main className="app-main">
           <Routes>
             <Route path="/" element={<LandingPage />} />
+            <Route path="/login" element={<RequireWallet><LoginPage /></RequireWallet>} />
+            <Route path="/register-account" element={<RequireWallet><UserRegistrationPage /></RequireWallet>} />
+            <Route path="/identity-verification" element={<RequireWallet><IdentityVerificationPage /></RequireWallet>} />
             <Route path="/profile/verify" element={
               <RequireWallet><ContactVerificationPage /></RequireWallet>
             } />

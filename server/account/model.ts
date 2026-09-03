@@ -5,9 +5,9 @@
 // NEVER HOLDS:
 //
 //   * password — stored ONLY as a salted scrypt hash (see security.ts),
-//   * Aadhaar number / Aadhaar image / DOB / address / mobile — NEVER stored in
-//     plaintext; ranged into an encrypted-at-rest PII blob (AES-256-GCM), or
-//     retained only as masked public-safe display fragments,
+//   * Aadhaar number / Aadhaar image / DOB / address / pincode / mobile — NEVER
+//     stored in plaintext; merged into an encrypted-at-rest PII blob
+//     (AES-256-GCM), or retained only as masked public-safe display fragments,
 //   * OTP codes — never stored at all (OtpService keeps only HMAC hashes),
 //   * passport photo / selfie / biometrics — never persisted server-side or
 //     on-chain; the browser performs a clearly-labelled DEMO match and stores
@@ -17,6 +17,9 @@
 // PII; they reference an account by a random non-PII accountId.
 
 import { normalizeIndianMobile } from '../lib/validation.js';
+
+// Re-exported for convenience by account tests / callers.
+export { normalizeIndianMobile } from '../lib/validation.js';
 
 export const ACCOUNT_PII_VERSION = 1 as const;
 
@@ -45,7 +48,6 @@ export interface PublicAccountView {
   readonly maskedMobile: string;
   /** Masked Aadhaar, e.g. •••• 4321 — never the full number. */
   readonly maskedAadhaar: string;
-  readonly pincode?: string;
   readonly smsOtpVerified: boolean;
   readonly whatsappOtpVerified: boolean;
   readonly googleLinked: boolean;
@@ -64,7 +66,6 @@ export interface AccountRecord {
   readonly piiCipherText: string;
   readonly maskedMobile: string;
   readonly maskedAadhaar: string;
-  readonly pincode?: string;
   readonly smsOtpVerified: boolean;
   readonly whatsappOtpVerified: boolean;
   readonly googleLinked: boolean;
@@ -93,11 +94,18 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 /** Minimum acceptable password length (with diverse characters required). */
 export const MIN_PASSWORD_LENGTH = 8;
 
+/** Optional PII context used to reject passwords that reuse personal data. */
+export interface PasswordContext {
+  mobile?: string;
+  aadhaarNumber?: string;
+  fullName?: string;
+}
+
 /**
  * Validate password strength. Returns a list of unmet requirements; empty
  * means the password is acceptable. Never returns the password itself.
  */
-export function passwordIssues(password: string): string[] {
+export function passwordIssues(password: string, context: PasswordContext = {}): string[] {
   const issues: string[] = [];
   if (password.length < MIN_PASSWORD_LENGTH) {
     issues.push(`at least ${MIN_PASSWORD_LENGTH} characters`);
@@ -106,6 +114,15 @@ export function passwordIssues(password: string): string[] {
   if (!/[A-Z]/.test(password)) issues.push('an uppercase letter');
   if (!/[0-9]/.test(password)) issues.push('a number');
   if (!/[^A-Za-z0-9]/.test(password)) issues.push('a symbol');
+  if (context.mobile && password.includes(context.mobile)) {
+    issues.push('the mobile number');
+  }
+  if (context.aadhaarNumber && password.includes(context.aadhaarNumber)) {
+    issues.push('the Aadhaar number');
+  }
+  if (context.fullName && password.toLowerCase().includes(context.fullName.toLowerCase().trim())) {
+    issues.push('your name');
+  }
   return issues;
 }
 
@@ -172,19 +189,19 @@ export function parseAccountRegistration(
   const dateOfBirth = str('dateOfBirth');
   if (!isValidPastDate(dateOfBirth)) issues.push('Enter a valid past date of birth (1900–today).');
 
-  const mobileE164 = normalizeIndianMobile(str('mobile'));
+  const mobileRaw = str('mobile');
+  const mobileE164 = normalizeIndianMobile(mobileRaw);
   if (!mobileE164) issues.push('Enter a valid Indian mobile number.');
 
   const password = str('password');
   const passwordConfirm = str('passwordConfirm');
-  for (const issue of passwordIssues(password)) issues.push(`Password needs ${issue}.`);
+  for (const issue of passwordIssues(password, {
+    mobile: mobileRaw.replace(/\D/g, ''),
+    aadhaarNumber,
+    fullName,
+  })) issues.push(`Password needs ${issue}.`);
 
   if (password !== passwordConfirm) issues.push('Passwords do not match.');
-
-  // Password must not reuse simple PII (mobile or aadhaar) — a weak guess risk.
-  if (password && (password.includes(mobileE164 ?? '') || password.includes(aadhaarNumber))) {
-    issues.push('Password must not contain your mobile number or Aadhaar.');
-  }
 
   if (issues.length > 0) return { ok: false, issues };
 
@@ -217,7 +234,6 @@ export function toPublicAccountView(record: AccountRecord): PublicAccountView {
     fullName: undefined,
     maskedMobile: record.maskedMobile,
     maskedAadhaar: record.maskedAadhaar,
-    pincode: record.pincode,
     smsOtpVerified: record.smsOtpVerified,
     whatsappOtpVerified: record.whatsappOtpVerified,
     googleLinked: record.googleLinked,
