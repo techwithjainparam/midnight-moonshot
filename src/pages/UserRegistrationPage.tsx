@@ -1,39 +1,58 @@
 import { useState, useCallback, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import ProductBanner from '../components/ProductBanner';
+import RegistrationStepper from '../components/RegistrationStepper';
 import { useAuth } from '../auth/AuthContext';
 import {
   validateRegistrationForm,
   normalizeIndianMobile,
   maskAadhaar,
   type AccountCapabilities,
+  type RegistrationFactor,
+  type RegistrationSnapshot,
   type RegistrationFieldErrors,
 } from '../auth/account-types';
 import {
   registerAccount,
   fetchAccountCapabilities,
+  checkAccountExists,
+  beginGoogle,
+  completeGoogleWithState,
+  sendSmsOtp,
+  verifySmsOtp,
+  sendWhatsappOtp,
+  verifyWhatsappOtp,
 } from '../auth/account-api';
 import { saveAccount, getAccount } from '../auth/account-store';
 
 // FEATURE 3 — Secure user registration (`/register-account`).
 //
-// Creates a Level 3 PRIESTATE account bound to the connected Midnight
-// wallet, collecting profile data, a password, and the five login factors.
-// Passwords are hashed (salted scrypt) and raw PII (Aadhaar, address, DOB,
-// mobile) is encrypted at rest — all on the verification server. This client
-// only ever stores masked fragments and never a password, OTP, or raw PII.
+// Registration is modelled as a SEQUENTIAL authentication state machine:
 //
-// The multi-factor channels (SMS/WhatsApp/Google) are REAL providers gated by
-// server configuration via `fetchAccountCapabilities`. When a factor is not
-// configured the UI shows it as unavailable and registration cannot be
-// completed — no fake auth, no hard-coded credentials.
+//   Connect Wallet → check account existence → (no account) → fill profile →
+//   create account (wallet factor verified) → Google → SMS OTP → WhatsApp OTP
+//
+// If an account already exists for the wallet, the app does NOT create another
+// account — it directs the user to Login. Registration authentication is only
+// considered complete once every configured factor has passed. Missing
+// factors are never silently bypassed.
+//
+// Passwords are hashed (salted scrypt) and raw PII is encrypted at rest — all
+// on the verification server. This client only ever stores masked fragments
+// and never a password, OTP, or raw PII. Google sign-in uses a server-issued
+// state + nonce challenge.
+
+type Phase = 'check' | 'form' | 'factors' | 'done';
 
 export default function UserRegistrationPage() {
   const { address } = useAuth();
   const navigate = useNavigate();
 
+  const [phase, setPhase] = useState<Phase>('check');
   const [caps, setCaps] = useState<AccountCapabilities | null>(null);
   const [capsLoaded, setCapsLoaded] = useState(false);
+  const [regState, setRegState] = useState<RegistrationSnapshot | null>(null);
+  const [existsError, setExistsError] = useState<string | null>(null);
 
   const [fullName, setFullName] = useState('');
   const [aadhaarNumber, setAadhaarNumber] = useState('');
@@ -48,13 +67,42 @@ export default function UserRegistrationPage() {
 
   const [errors, setErrors] = useState<RegistrationFieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<{ accountId: string; maskedMobile: string; maskedAadhaar: string } | null>(null);
 
-  // Existing account for this wallet → direct them to login.
+  // Active factor-step state (only used once phase === 'factors').
+  const [activeFactor, setActiveFactor] = useState<RegistrationFactor | 'google' | 'sms' | 'whatsapp' | null>(null);
+  const [busyFactor, setBusyFactor] = useState<RegistrationFactor | null>(null);
+  const [stepMessage, setStepMessage] = useState<string | null>(null);
+  const [stepError, setStepError] = useState<string | null>(null);
+  const [googleChallenge, setGoogleChallenge] = useState<{ state: string; nonce: string } | null>(null);
+  const [googleCode, setGoogleCode] = useState('');
+  const [smsCode, setSmsCode] = useState('');
+  const [whatsappCode, setWhatsappCode] = useState('');
+  const [smsSentAt, setSmsSentAt] = useState<number | null>(null);
+  const [whatsappSentAt, setWhatsappSentAt] = useState<number | null>(null);
+
+  // Authoritative account-existence check after wallet connect. If an account
+  // already exists for this wallet, never create another — route to Login.
   useEffect(() => {
-    if (address && getAccount(address)) {
+    if (!address) return;
+    let cancelled = false;
+    setExistsError(null);
+    checkAccountExists(address).then((r) => {
+      if (cancelled) return;
+      setExistsError(r.ok ? null : (r.message ?? 'Could not check this wallet.'));
+      const exists = r.ok ? r.data.exists : null;
+      if (exists === true) {
+        // Existing account → direction to login, NOT another registration.
+        navigate('/login', { replace: true });
+        return;
+      }
+      setPhase('form');
+    });
+    // Local fast-path (not authoritative): if a local account record exists,
+    // skip straight to login too.
+    if (getAccount(address)) {
       navigate('/login', { replace: true });
     }
+    return () => { cancelled = true; };
   }, [address, navigate]);
 
   // Discover which server-side factor channels are configured (honest state).
@@ -126,35 +174,315 @@ export default function UserRegistrationPage() {
     }
     const view = result.data.account;
     saveAccount(view);
-    setSuccess({
-      accountId: view.accountId,
-      maskedMobile: view.maskedMobile,
-      maskedAadhaar: view.maskedAadhaar,
+    // Move into the sequential registration FACTOR setup. Wallet factor is
+    // verified at creation; the next pending factor is driven below.
+    setPhase('factors');
+    setRegState({
+      walletVerified: true,
+      googleVerified: view.googleLinked,
+      smsVerified: view.smsOtpVerified,
+      whatsappVerified: view.whatsappOtpVerified,
+      complete: false,
+      nextPendingFactor: 'google',
+      pendingStep: 'Google',
     });
+    setActiveFactor('google');
+    setStepMessage('Complete each factor in order to finish authenticating your registration.');
   }, [address, aadhaarNumber, addressOnAadhaar, caps, dateOfBirth, fullName, mobile, password, passwordConfirm, pincode]);
 
-  if (success) {
+  // ── Registration factor-step handlers ────────────────────────────
+
+  const applyFactor = (patch: Partial<Pick<RegistrationSnapshot, 'googleVerified' | 'smsVerified' | 'whatsappVerified'>>) => {
+    setRegState((prev) => {
+      if (!prev) return prev;
+      const next = { ...prev, ...patch };
+      const order: Array<'google' | 'sms' | 'whatsapp'> = ['google', 'sms', 'whatsapp'];
+      const nextPending = order.find((f) => (f === 'google' ? !next.googleVerified : f === 'sms' ? !next.smsVerified : !next.whatsappVerified)) ?? null;
+      next.nextPendingFactor = nextPending as RegistrationFactor | null;
+      next.pendingStep = nextPending === null ? null : nextPending === 'google' ? 'Google' : nextPending === 'sms' ? 'SMS OTP' : 'WhatsApp OTP';
+      next.complete = nextPending === null;
+      return next;
+    });
+  };
+
+  const handleBeginGoogle = useCallback(async () => {
+    if (!address) return;
+    setStepError(null);
+    setBusyFactor('google');
+    try {
+      const r = await beginGoogle(address);
+      if (!r.ok) {
+        setStepError(`Google: ${factorStepMsg(r.reason, r.message)}`);
+        return;
+      }
+      setGoogleChallenge({ state: r.data.state, nonce: r.data.nonce });
+      setStepMessage('Google sign-in started. Enter the one-time authorization code to link your account.');
+    } finally {
+      setBusyFactor(null);
+    }
+  }, [address]);
+
+  const handleCompleteGoogle = useCallback(async () => {
+    if (!address || !googleChallenge) return;
+    if (!googleChallenge || googleCode.trim().length < 4) {
+      setStepError('Enter the one-time authorization code to continue.');
+      return;
+    }
+    setStepError(null);
+    setBusyFactor('google');
+    try {
+      const r = await completeGoogleWithState(address, {
+        state: googleChallenge.state,
+        nonce: googleChallenge.nonce,
+        code: googleCode.trim(),
+      });
+      if (!r.ok) {
+        setStepError(`Google: ${factorStepMsg(r.reason, r.message)}`);
+        setGoogleChallenge(null);
+        return;
+      }
+      applyFactor({ googleVerified: true });
+      setGoogleCode('');
+      setGoogleChallenge(null);
+      setStepMessage('Google linked. Next: SMS OTP.');
+      setActiveFactor(regState?.smsVerified ? 'whatsapp' : 'sms');
+    } finally {
+      setBusyFactor(null);
+    }
+  }, [address, googleChallenge, googleCode, regState]);
+
+  const handleSendSms = useCallback(async () => {
+    if (!address) return;
+    setStepError(null);
+    setBusyFactor('sms');
+    try {
+      const r = await sendSmsOtp(address);
+      if (!r.ok) {
+        setStepError(`SMS OTP: ${factorStepMsg(r.reason, r.message)}`);
+        return;
+      }
+      setSmsSentAt(Date.now());
+      setStepMessage('SMS code sent. Enter the 6-digit code from your mobile.');
+    } finally {
+      setBusyFactor(null);
+    }
+  }, [address]);
+
+  const handleVerifySms = useCallback(async () => {
+    if (!address) return;
+    if (smsCode.length !== 6) {
+      setStepError('Enter the 6-digit SMS code.');
+      return;
+    }
+    setStepError(null);
+    setBusyFactor('sms');
+    try {
+      const r = await verifySmsOtp(address, smsCode);
+      if (!r.ok) {
+        setStepError(`SMS OTP: ${factorStepMsg(r.reason, r.message)}`);
+        return;
+      }
+      applyFactor({ smsVerified: true });
+      setSmsCode('');
+      setSmsSentAt(null);
+      setStepMessage(regState?.whatsappVerified ? 'SMS verified. Registration authentication is complete.' : 'SMS verified. Next: WhatsApp OTP.');
+      setActiveFactor(regState?.whatsappVerified ? null : 'whatsapp');
+    } finally {
+      setBusyFactor(null);
+    }
+  }, [address, smsCode, regState]);
+
+  const handleSendWhatsapp = useCallback(async () => {
+    if (!address) return;
+    setStepError(null);
+    setBusyFactor('whatsapp');
+    try {
+      const r = await sendWhatsappOtp(address);
+      if (!r.ok) {
+        setStepError(`WhatsApp OTP: ${factorStepMsg(r.reason, r.message)}`);
+        return;
+      }
+      setWhatsappSentAt(Date.now());
+      setStepMessage('WhatsApp code sent. Enter the 6-digit code you received.');
+    } finally {
+      setBusyFactor(null);
+    }
+  }, [address]);
+
+  const handleVerifyWhatsapp = useCallback(async () => {
+    if (!address) return;
+    if (whatsappCode.length !== 6) {
+      setStepError('Enter the 6-digit WhatsApp code.');
+      return;
+    }
+    setStepError(null);
+    setBusyFactor('whatsapp');
+    try {
+      const r = await verifyWhatsappOtp(address, whatsappCode);
+      if (!r.ok) {
+        setStepError(`WhatsApp OTP: ${factorStepMsg(r.reason, r.message)}`);
+        return;
+      }
+      applyFactor({ whatsappVerified: true });
+      setWhatsappCode('');
+      setWhatsappSentAt(null);
+      setStepMessage('All registration authentication factors are verified. Enjoy your account!');
+      setActiveFactor(null);
+    } finally {
+      setBusyFactor(null);
+    }
+  }, [address, whatsappCode]);
+
+  // Existence check in progress / error.
+  if (phase === 'check') {
+    return (
+      <div className="page profile-page">
+        <ProductBanner />
+        <div className="auth-gate">
+          <h1 className="auth-gate-title">
+            {existsError ? 'Could not check this wallet' : 'Checking this wallet…'}
+          </h1>
+          <p className="auth-gate-desc">
+            {existsError
+              ? `${existsError} Please try again.`
+              : 'Verifying whether your wallet already has a PRIESTATE account.'}
+          </p>
+          {existsError && (
+            <Link to="/" className="btn btn-primary btn-lg">Return Home</Link>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Registration factor setup (sequential Wallet → Google → SMS → WhatsApp).
+  if (phase === 'factors') {
     return (
       <div className="page profile-page">
         <ProductBanner />
         <div className="page-header">
-          <h1 className="page-title">Account Created</h1>
-          <p className="page-desc">Your PRIESTATE account is registered and bound to your wallet.</p>
-        </div>
-        <div className="profile-card">
-          <div className="profile-steps" aria-label="Status">
-            <span className="profile-step done active">✓ Registered</span>
-          </div>
-          <p className="profile-done-note">
-            Complete the multi-factor steps below to finish setting up your
-            account, then verify your identity to fully log in. Your mobile and
-            Aadhaar are stored encrypted on the server and shown here only
-            masked.
+          <h1 className="page-title">Finish Registering Your Account</h1>
+          <p className="page-desc" style={{ maxWidth: 680 }}>
+            Your wallet factor is verified. Complete the remaining authentication
+            factors <strong>in order</strong> to finish setting up your PRIESTATE
+            account. Each factor requires a real, server-configured provider —
+            none is ever faked.
           </p>
-          <div className="profile-done-actions">
-            <button className="btn btn-primary btn-lg" onClick={() => navigate('/login')}>Continue to Login</button>
-            <button className="btn btn-ghost" onClick={() => navigate('/dashboard')}>Dashboard</button>
-          </div>
+        </div>
+
+        <div className="account-card">
+          <RegistrationStepper
+            snapshot={regState}
+            configured={{
+              google: Boolean(caps?.googleConfigured),
+              sms: Boolean(caps?.smsConfigured),
+              whatsapp: Boolean(caps?.whatsappConfigured),
+            }}
+            busyFactor={busyFactor}
+            message={stepMessage || (activeFactor ? `Complete the ${activeFactor === 'google' ? 'Google' : activeFactor === 'sms' ? 'SMS OTP' : 'WhatsApp OTP'} step.` : null)}
+          />
+
+          {activeFactor && (
+            <section className="account-section">
+              <h2 className="account-section-title">
+                {activeFactor === 'google' ? 'Google (step 2 of 4)' : activeFactor === 'sms' ? 'SMS OTP (step 3 of 4)' : 'WhatsApp OTP (step 4 of 4)'}
+              </h2>
+
+              {activeFactor === 'google' && !googleChallenge && (
+                <div className="account-card-actions">
+                  <button className="btn btn-primary" onClick={() => void handleBeginGoogle()} disabled={busyFactor === 'google' || !caps?.googleConfigured}>
+                    {!caps?.googleConfigured ? 'Google unavailable on server' : busyFactor === 'google' ? 'Starting…' : 'Start Google sign-in'}
+                  </button>
+                  {!caps?.googleConfigured && (
+                    <span className="status-msg error" role="alert">Google is not configured on the verification server — this factor cannot be completed.</span>
+                  )}
+                </div>
+              )}
+
+              {activeFactor === 'google' && googleChallenge && (
+                <div className="form-field">
+                  <label className="form-label">Google authorization code</label>
+                  <input
+                    type="text"
+                    autoComplete="off"
+                    className="form-input"
+                    placeholder="One-time authorization code"
+                    value={googleCode}
+                    onChange={(e) => setGoogleCode(e.target.value)}
+                  />
+                  <button className="btn btn-primary" onClick={() => void handleCompleteGoogle()} disabled={busyFactor === 'google' || googleCode.length < 4}>
+                    {busyFactor === 'google' ? 'Verifying…' : 'Confirm Google sign-in'}
+                  </button>
+                  <span className="form-hint">The challenge nonce is held server-side and never placed in a URL or stored locally.</span>
+                </div>
+              )}
+
+              {activeFactor === 'sms' && (
+                <div className="form-field">
+                  {smsSentAt === null ? (
+                    <button className="btn btn-primary" onClick={() => void handleSendSms()} disabled={busyFactor === 'sms' || !caps?.smsConfigured}>
+                      {!caps?.smsConfigured ? 'SMS unavailable on server' : busyFactor === 'sms' ? 'Sending…' : 'Send SMS code'}
+                    </button>
+                  ) : (
+                    <>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        className="form-input"
+                        maxLength={6}
+                        placeholder="_ _ _ _ _ _"
+                        value={smsCode}
+                        onChange={(e) => setSmsCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                      />
+                      <button className="btn btn-primary" onClick={() => void handleVerifySms()} disabled={busyFactor === 'sms' || smsCode.length !== 6}>
+                        {busyFactor === 'sms' ? 'Verifying…' : 'Verify SMS code'}
+                      </button>
+                    </>
+                  )}
+                  {!caps?.smsConfigured && (
+                    <span className="status-msg error" role="alert">SMS is not configured on the verification server — this factor cannot be completed.</span>
+                  )}
+                </div>
+              )}
+
+              {activeFactor === 'whatsapp' && (
+                <div className="form-field">
+                  {whatsappSentAt === null ? (
+                    <button className="btn btn-primary" onClick={() => void handleSendWhatsapp()} disabled={busyFactor === 'whatsapp' || !caps?.whatsappConfigured}>
+                      {!caps?.whatsappConfigured ? 'WhatsApp unavailable on server' : busyFactor === 'whatsapp' ? 'Sending…' : 'Send WhatsApp code'}
+                    </button>
+                  ) : (
+                    <>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        className="form-input"
+                        maxLength={6}
+                        placeholder="_ _ _ _ _ _"
+                        value={whatsappCode}
+                        onChange={(e) => setWhatsappCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                      />
+                      <button className="btn btn-primary" onClick={() => void handleVerifyWhatsapp()} disabled={busyFactor === 'whatsapp' || whatsappCode.length !== 6}>
+                        {busyFactor === 'whatsapp' ? 'Verifying…' : 'Verify WhatsApp code'}
+                      </button>
+                    </>
+                  )}
+                  {!caps?.whatsappConfigured && (
+                    <span className="status-msg error" role="alert">WhatsApp is not configured on the verification server — this factor cannot be completed.</span>
+                  )}
+                </div>
+              )}
+
+              {stepError && <div className="status-msg error" role="alert">{stepError}</div>}
+            </section>
+          )}
+
+          {regState?.complete && (
+            <div className="account-card-actions">
+              <button className="btn btn-primary btn-lg" onClick={() => navigate('/login')}>Continue to Login</button>
+              <button className="btn btn-ghost" onClick={() => navigate('/dashboard')}>Dashboard</button>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -395,5 +723,22 @@ function registerErrorMessage(reason: string, message?: string): string {
       return message ?? 'Could not reach the verification server. Try again.';
     default:
       return message ?? 'Registration could not be completed. Try again.';
+  }
+}
+
+function factorStepMsg(reason: string, message?: string): string {
+  switch (reason) {
+    case 'bad-state':
+      return 'The sign-in challenge was missing or malformed. Please start the step again.';
+    case 'expired':
+      return 'This sign-in challenge expired. Start the step again.';
+    case 'replay':
+      return 'This sign-in attempt was already used. Start the step again.';
+    case 'unavailable':
+      return message ?? 'This factor is not configured on the verification server and cannot be completed.';
+    case 'invalid-input':
+      return message ?? 'The value you entered is invalid. Check and try again.';
+    default:
+      return message ?? 'That step could not be completed. Try again.';
   }
 }

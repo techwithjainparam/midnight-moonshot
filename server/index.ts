@@ -418,8 +418,12 @@ export function createVerificationServer(
         return void (await routeAccountWhatsappSend(req, res));
       case '/api/v1/account/otp-whatsapp/verify':
         return void (await routeAccountWhatsappVerify(req, res, body));
+      case '/api/v1/account/google/begin':
+        return void (await routeAccountGoogleBegin(req, res));
       case '/api/v1/account/google/complete':
         return void (await routeAccountGoogleComplete(req, res, body));
+      case '/api/v1/account/exists':
+        return void routeAccountExists(res, body);
       case '/api/v1/account/identity-verified':
         return void (await routeAccountIdentity(req, res, body));
       case '/api/v1/account/login':
@@ -460,6 +464,15 @@ export function createVerificationServer(
         return;
       case 'identity-verification-required':
         sendJson(res, 428, { ok: false, reason: 'identity-verification-required' });
+        return;
+      case 'bad-state':
+        sendJson(res, 400, { ok: false, reason: 'bad-state', message: 'Invalid Google sign-in state.' });
+        return;
+      case 'expired':
+        sendJson(res, 400, { ok: false, reason: 'expired', message: 'Google sign-in state expired. Restart it.' });
+        return;
+      case 'replay':
+        sendJson(res, 400, { ok: false, reason: 'replay', message: 'Google sign-in state was already used.' });
         return;
       default:
         sendJson(res, 500, { ok: false, reason: 'internal' });
@@ -616,7 +629,23 @@ export function createVerificationServer(
   ): Promise<void> {
     const auth = requireAuth(req, res);
     if (!auth) return;
-    const authCode = str(body, 'authCode');
+    const authCode = str(body, 'authCode') || str(body, 'code');
+    const state = str(body, 'state');
+    const nonce = str(body, 'nonce');
+
+    // Secure state/nonce flow: the client begins Google auth, receives a
+    // state+nonce, and echoes them here. If present they are enforced.
+    if (state && nonce) {
+      const result = accountService.googleComplete(auth.walletAddress, { state, nonce, code: authCode });
+      if (result.ok && 'view' in result) {
+        sendJson(res, 200, { ok: true, account: result.view });
+        return;
+      }
+      sendAccountError(res, result.ok ? 'internal' : result.reason);
+      return;
+    }
+
+    // Legacy code-only path (used by existing tests / simple flows).
     const result = accountService.completeGoogle(auth.walletAddress, authCode);
     if (!result.ok) {
       sendAccountError(res, result.reason);
@@ -624,6 +653,38 @@ export function createVerificationServer(
     }
     if (!('view' in result)) return sendAccountError(res, 'internal');
     sendJson(res, 200, { ok: true, account: result.view });
+  }
+
+  /** Begin a secure Google sign-in, returning a fresh state + nonce challenge. */
+  async function routeAccountGoogleBegin(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const result = accountService.googleBegin(auth.walletAddress);
+    if (!result.ok) {
+      sendAccountError(res, result.reason);
+      return;
+    }
+    // The nonce is returned to the in-app client (never placed in a URL);
+    // the state is meant to be passed through the OAuth callback.
+    sendJson(res, 200, { ok: true, state: result.state, nonce: result.nonce, authUrl: result.authUrl });
+  }
+
+  /**
+   * Authoritative account-existence + registration-state check. Reveals
+   * nothing but { exists, registration } — never PII.
+   */
+  function routeAccountExists(res: http.ServerResponse, body: JsonBody): void {
+    const walletAddress = str(body, 'walletAddress');
+    if (!/^0x[a-fA-F0-9]{64}$/.test(walletAddress)) {
+      sendJson(res, 400, { ok: false, reason: 'invalid-input' });
+      return;
+    }
+    const exists = accountService.hasAccount(walletAddress);
+    const registration = accountService.registrationState(walletAddress);
+    sendJson(res, 200, { ok: true, exists, registration });
   }
 
   async function routeAccountIdentity(

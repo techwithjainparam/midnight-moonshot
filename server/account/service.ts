@@ -23,6 +23,12 @@ import { randomBytes } from 'node:crypto';
 import { OtpService, type OtpIssueResult, type OtpVerifyResult } from '../lib/otp-service.js';
 import type { AccountStore } from './store.js';
 import { InMemoryAccountStore } from './store.js';
+import { GoogleProvider, type GoogleBeginResult, type GoogleCompleteResult } from './google-provider.js';
+import {
+  deriveRegistrationState,
+  type RegistrationFactor,
+  type RegistrationSnapshot,
+} from './registration-state.js';
 import {
   parseAccountRegistration,
   type AccountRecord,
@@ -42,7 +48,7 @@ import { normalizeIndianMobile } from '../lib/validation.js';
 export type AccountResult =
   | { ok: true; view: PublicAccountView }
   | { ok: true; session: { accountId: string } }
-  | { ok: false; reason: 'unavailable' | 'unauthorized' | 'invalid-input' | 'not-found' | 'already-registered' | 'duplicate-otp' | 'factor-missing' | 'otp-required' | 'identity-verification-required' };
+  | { ok: false; reason: 'unavailable' | 'unauthorized' | 'invalid-input' | 'not-found' | 'already-registered' | 'duplicate-otp' | 'factor-missing' | 'otp-required' | 'identity-verification-required' | 'bad-state' | 'expired' | 'replay' };
 
 export interface AccountServiceOptions {
   readonly store?: AccountStore;
@@ -69,6 +75,12 @@ export interface AccountServiceOptions {
    * provider it returns false so the feature stays `unavailable`.
    */
   readonly googleAuthenticator?: { readonly configured: boolean; readonly complete: (code: string) => boolean };
+  /**
+   * Optional secure Google OAuth session manager used for the registration
+   * `begin`/`complete(state, nonce, code)` flow. When omitted, a provider is
+   * derived from `googleAuthenticator`.
+   */
+  readonly googleProvider?: GoogleProvider;
   readonly now?: () => number;
 }
 
@@ -80,6 +92,7 @@ export class AccountService {
   private readonly smsDelivery: { configured: boolean; send: (to: string, code: string) => void };
   private readonly whatsappDelivery: { configured: boolean; send: (to: string, code: string) => void };
   private readonly googleAuthenticator: { configured: boolean; complete: (code: string) => boolean };
+  private readonly googleProvider: GoogleProvider;
   readonly smsConfigured: boolean;
   readonly whatsappConfigured: boolean;
   readonly googleConfigured: boolean;
@@ -107,6 +120,13 @@ export class AccountService {
     this.whatsappDelivery = options.whatsappDelivery ?? { configured: false, send: () => undefined };
     this.googleAuthenticator =
       options.googleAuthenticator ?? { configured: false, complete: () => false };
+    this.googleProvider =
+      options.googleProvider ??
+      new GoogleProvider({
+        configured: this.googleAuthenticator.configured,
+        exchange: (code) => this.googleAuthenticator.complete(code),
+        now: options.now,
+      });
     this.smsConfigured = this.smsDelivery.configured;
     this.whatsappConfigured = this.whatsappDelivery.configured;
     this.googleConfigured = this.googleAuthenticator.configured;
@@ -286,6 +306,71 @@ export class AccountService {
     this.store.update(walletAddress, { googleLinked: true });
     const updated = this.store.getByWallet(walletAddress)!;
     return { ok: true, view: toPublicAccountView(updated) };
+  }
+
+  /**
+   * Start a secure Google sign-in for the registration flow. Issues a fresh
+   * state + nonce challenge bound to the wallet. Fail-closed when the Google
+   * provider is unconfigured. The nonce is returned to the in-app client and
+   * must be echoed back alongside the OAuth state on completion.
+   */
+  googleBegin(walletAddress: string): GoogleBeginResult {
+    return this.googleProvider.begin(walletAddress);
+  }
+
+  /**
+   * Complete a secure Google sign-in. Validates the state/nonce challenge
+   * (single-use, wallet-bound, TTL) before exchanging the code. On success,
+   * marks the account's Google factor verified. Never fabricates a success.
+   */
+  googleComplete(
+    walletAddress: string,
+    params: { state: string; nonce: string; code: string },
+  ): AccountResult {
+    const result: GoogleCompleteResult = this.googleProvider.complete(walletAddress, params);
+    if (!result.ok) {
+      switch (result.reason) {
+        case 'unavailable':
+          return { ok: false, reason: 'unavailable' };
+        case 'expired':
+          return { ok: false, reason: 'expired' };
+        case 'replay':
+          return { ok: false, reason: 'replay' };
+        case 'unauthorized':
+          return { ok: false, reason: 'unauthorized' };
+        default:
+          return { ok: false, reason: 'bad-state' };
+      }
+    }
+    const record = this.store.getByWallet(walletAddress);
+    if (!record) return { ok: false, reason: 'not-found' };
+    this.store.update(walletAddress, { googleLinked: true });
+    const updated = this.store.getByWallet(walletAddress)!;
+    return { ok: true, view: toPublicAccountView(updated) };
+  }
+
+  // ── Account existence & registration state ────────────────────────
+
+  /**
+   * Authoritative server-side existence check for a wallet. Returns ONLY
+   * whether an account exists and its registration factor state — never any
+   * PII. Used on wallet connect to route to registration vs login.
+   */
+  hasAccount(walletAddress: string): boolean {
+    return this.store.getByWallet(walletAddress) !== null;
+  }
+
+  /**
+   * Expose the registration factor state machine for an account. Returns null
+   * when no account exists (no PII is revealed either way).
+   */
+  registrationState(
+    walletAddress: string,
+    requiredFactors?: readonly RegistrationFactor[],
+  ): RegistrationSnapshot | null {
+    const record = this.store.getByWallet(walletAddress);
+    if (!record) return null;
+    return deriveRegistrationState(record, { requiredFactors });
   }
 
   // ── Identity ───────────────────────────────────────────────────────

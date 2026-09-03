@@ -4319,3 +4319,113 @@ select.form-input {
   border-color: rgba(124, 168, 255, 0.35);
   background: rgba(124, 168, 255, 0.08);
 }
+
+/* ── Registration authentication stepper (Level 3 Part 3) ───────── */
+.registration-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 1rem 0;
+}
+
+.registration-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.registration-step-indicator {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+}
+
+.registration-step-dot {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1.5px solid var(--color-border);
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+  transition: all var(--transition-normal);
+  position: relative;
+  z-index: 1;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.registration-step.done .registration-step-dot {
+  background: rgba(52, 211, 153, 0.12);
+  border-color: var(--color-success);
+  color: var(--color-success);
+}
+
+.registration-step.active .registration-step-dot {
+  background: rgba(124, 90, 255, 0.12);
+  border-color: var(--color-accent);
+  color: var(--color-accent-light);
+}
+
+.registration-step.unavailable .registration-step-dot {
+  background: rgba(248, 113, 113, 0.08);
+  border-color: var(--color-error);
+  color: var(--color-error);
+}
+
+.registration-step-pulse {
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 1.5px solid var(--color-accent);
+  opacity: 0;
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+.registration-step-x {
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.registration-step-num {
+  line-height: 1;
+}
+
+.registration-step-line {
+  width: 1.5px;
+  height: 24px;
+  background: var(--color-border);
+  margin: 2px 0;
+}
+
+.registration-step.done .registration-step-line {
+  background: var(--color-success);
+  opacity: 0.4;
+}
+
+.registration-step-label {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  padding-top: 2px;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.registration-step.done .registration-step-label {
+  color: var(--color-text-secondary);
+}
+
+.registration-step.active .registration-step-label {
+  color: var(--color-text);
+  font-weight: 500;
+}
+
+.registration-step.unavailable .registration-step-label {
+  color: var(--color-error);
+}

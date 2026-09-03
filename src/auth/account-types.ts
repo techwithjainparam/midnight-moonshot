@@ -14,6 +14,57 @@ export interface AccountCapabilities {
   readonly googleConfigured: boolean;
 }
 
+/** Registration authentication factor steps, in canonical order. */
+export type RegistrationFactor = 'wallet' | 'google' | 'sms' | 'whatsapp';
+
+export const REGISTRATION_FACTOR_ORDER: readonly RegistrationFactor[] = [
+  'wallet',
+  'google',
+  'sms',
+  'whatsapp',
+];
+
+export const REGISTRATION_FACTOR_LABELS: Record<RegistrationFactor, string> = {
+  wallet: 'Wallet',
+  google: 'Google',
+  sms: 'SMS OTP',
+  whatsapp: 'WhatsApp OTP',
+};
+
+/** Explicit registration auth state (mirror of the server projection). */
+export interface RegistrationSnapshot {
+  readonly walletVerified: boolean;
+  readonly googleVerified: boolean;
+  readonly smsVerified: boolean;
+  readonly whatsappVerified: boolean;
+  readonly complete: boolean;
+  readonly nextPendingFactor: RegistrationFactor | null;
+  readonly pendingStep: string | null;
+}
+
+export function snapshotFactorState(
+  snap: RegistrationSnapshot | null,
+): Record<RegistrationFactor, boolean> {
+  const empty: Record<RegistrationFactor, boolean> = {
+    wallet: false,
+    google: false,
+    sms: false,
+    whatsapp: false,
+  };
+  if (!snap) return empty;
+  return {
+    wallet: snap.walletVerified,
+    google: snap.googleVerified,
+    sms: snap.smsVerified,
+    whatsapp: snap.whatsappVerified,
+  };
+}
+
+/** True only when every registration factor has been verified. */
+export function isRegistrationComplete(snap: RegistrationSnapshot | null): boolean {
+  return Boolean(snap && snap.complete);
+}
+
 /** Public-safe account view returned by the server (never holds raw PII). */
 export interface PublicAccountView {
   readonly accountId: string;

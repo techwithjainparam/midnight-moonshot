@@ -7,7 +7,7 @@
 // surfaces an honest `unavailable` state — it never fakes a factor.
 
 import { verificationApiBase } from '../profile/providers/backend-providers';
-import type { AccountCapabilities, PublicAccountView } from './account-types';
+import type { AccountCapabilities, PublicAccountView, RegistrationSnapshot } from './account-types';
 
 export type AccountApiResult<T> =
   | { ok: true; data: T }
@@ -103,6 +103,34 @@ export function verifyWhatsappOtp(walletAddress: string, code: string): Promise<
 
 export function completeGoogle(walletAddress: string, authCode: string): Promise<AccountApiResult<{ account: PublicAccountView }>> {
   return api('/v1/account/google/complete', { walletAddress, authCode });
+}
+
+/** Begin a secure Google sign-in, returning the state + nonce challenge. */
+export function beginGoogle(walletAddress: string): Promise<
+  AccountApiResult<{ ok: true; state: string; nonce: string; authUrl: string }>
+> {
+  return api('/v1/account/google/begin', { walletAddress });
+}
+
+/**
+ * Complete a secure Google sign-in with the challenge state + nonce. The
+ * nonce is echoed back from the in-app client — never placed in a URL.
+ */
+export function completeGoogleWithState(
+  walletAddress: string,
+  params: { state: string; nonce: string; code: string },
+): Promise<AccountApiResult<{ account: PublicAccountView }>> {
+  return api('/v1/account/google/complete', { ...params, authCode: params.code, walletAddress });
+}
+
+export interface AccountExistence {
+  readonly exists: boolean;
+  readonly registration: RegistrationSnapshot | null;
+}
+
+/** Authoritative existence + registration-state check for a wallet. */
+export function checkAccountExists(walletAddress: string): Promise<AccountApiResult<AccountExistence>> {
+  return api('/v1/account/exists', { walletAddress });
 }
 
 export function markIdentityVerified(walletAddress: string, confirmed: boolean): Promise<AccountApiResult<{ account: PublicAccountView }>> {
