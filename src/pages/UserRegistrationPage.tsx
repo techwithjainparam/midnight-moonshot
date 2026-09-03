@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import ProductBanner from '../components/ProductBanner';
 import RegistrationStepper from '../components/RegistrationStepper';
+import RegistrationLiveness from '../components/RegistrationLiveness';
 import { useAuth } from '../auth/AuthContext';
 import {
   validateRegistrationForm,
@@ -52,6 +53,7 @@ export default function UserRegistrationPage() {
   const [caps, setCaps] = useState<AccountCapabilities | null>(null);
   const [capsLoaded, setCapsLoaded] = useState(false);
   const [regState, setRegState] = useState<RegistrationSnapshot | null>(null);
+  const [livenessPassed, setLivenessPassed] = useState(false);
   const [existsError, setExistsError] = useState<string | null>(null);
 
   const [fullName, setFullName] = useState('');
@@ -477,7 +479,20 @@ export default function UserRegistrationPage() {
             </section>
           )}
 
-          {regState?.complete && (
+          {regState?.complete && !livenessPassed && (
+            <div className="liveness-insert">
+              <RegistrationLiveness
+                onComplete={(result) => {
+                  // Liveness is not a fabricated boolean: only a real pass
+                  // advances registration to its completion state. A failure
+                  // keeps us on the liveness step for a retry.
+                  if (result.passed) setLivenessPassed(true);
+                }}
+              />
+            </div>
+          )}
+
+          {regState?.complete && livenessPassed && (
             <div className="account-card-actions">
               <button className="btn btn-primary btn-lg" onClick={() => navigate('/login')}>Continue to Login</button>
               <button className="btn btn-ghost" onClick={() => navigate('/dashboard')}>Dashboard</button>
