@@ -573,7 +573,12 @@ test('[api] unconfigured features respond 503 with honest unavailability message
     const base = `http://127.0.0.1:${stack.port}`;
 
     const health = await getJson(`${base}/api/health`);
-    assert.deepEqual(health.body.capabilities, { emailOtp: false, aadhaarMobile: false, registry: false });
+    assert.deepEqual(health.body.capabilities, {
+      emailOtp: false,
+      aadhaarMobile: false,
+      registry: false,
+      account: { smsOtp: false, whatsappOtp: false, google: false },
+    });
 
     const email = await getJson(`${base}/api/v1/email/send-otp`, {
       method: 'POST',
@@ -603,7 +608,12 @@ test('[api] full email OTP round trip — the code exists ONLY in the inbox, nev
     const health = await getJson(`${base}/api/health`, {
       headers: { Origin: 'http://localhost:3000' },
     });
-    assert.deepEqual(health.body.capabilities, { emailOtp: true, aadhaarMobile: false, registry: false });
+    assert.deepEqual(health.body.capabilities, {
+      emailOtp: true,
+      aadhaarMobile: false,
+      registry: false,
+      account: { smsOtp: false, whatsappOtp: false, google: false },
+    });
     assert.equal(health.headers.get('access-control-allow-origin'), 'http://localhost:3000');
 
     const send = await getJson(`${base}/api/v1/email/send-otp`, {

@@ -61,7 +61,9 @@ import type { RegistryStore } from './registry/store';
 import { InMemoryRegistryStore } from './registry/store';
 import { AccountService } from './account/service';
 import type { AccountStore } from './account/store';
-import { InMemoryAccountStore } from './account/store';
+import { openDatabase } from './account/db';
+import { SqliteAccountStore } from './account/sqlite-store';
+import { SessionService } from './account/session';
 
 export interface VerificationServerOverrides {
   /** Test seam: replace SMTP delivery with a capture transport. */
@@ -82,6 +84,10 @@ export interface VerificationServerOverrides {
   readonly accountWhatsappDelivery?: { configured: boolean; send: (to: string, code: string) => void };
   /** Test seam: Google OAuth boundary. */
   readonly accountGoogleAuthenticator?: { configured: boolean; complete: (code: string) => boolean };
+  /** Test seam: provide a pre-built SessionService. */
+  readonly sessionService?: SessionService;
+  /** Test seam: SQLite database handle (skips openDatabase when set). */
+  readonly db?: import('better-sqlite3').Database;
 }
 
 const DEV_FALLBACK_OTP_SECRET =
@@ -91,6 +97,8 @@ interface BuiltStack {
   readonly server: http.Server;
   readonly port: number;
   readonly close: () => Promise<void>;
+  /** Expose session service so tests can create/validate sessions. */
+  readonly sessions: SessionService;
 }
 
 export function createVerificationServer(
@@ -137,8 +145,22 @@ export function createVerificationServer(
   // delivery, and the Google OAuth boundary are provider-configured; when any
   // is unset the affected feature reports `unavailable` (fail closed) — we
   // never fabricate auth. Test seams replace the transport with capture hooks.
+
+  // ── Database + persistent store (Level 3 Part 2) ─────────────────
+  const db = overrides.db ?? openDatabase(config.account?.dbPath || undefined);
+  const persistentAccountStore: AccountStore =
+    overrides.accountStore ?? new SqliteAccountStore(db);
+
+  // ── Server-side sessions ────────────────────────────────────────
+  const sessionService: SessionService =
+    overrides.sessionService ??
+    new SessionService(db, {
+      secure: config.account?.sessionSecure ?? true,
+      ttlMs: config.account?.sessionTtlMs,
+    });
+
   const accountService = new AccountService({
-    store: overrides.accountStore ?? new InMemoryAccountStore(),
+    store: persistentAccountStore,
     encryptionSecret: overrides.accountEncryptionSecret ?? config.account?.encryptionSecret ?? '',
     otp: { hashSecret: config.otp.hashSecret || DEV_FALLBACK_OTP_SECRET },
     smsDelivery:
@@ -163,6 +185,10 @@ export function createVerificationServer(
     windowMs: 60 * 60 * 1000,
   });
   const aadhaarStartLimiter = new RateLimiter({ maxEvents: 10, windowMs: 60 * 60 * 1000 });
+  // Account-sensitive endpoint rate limiters (per IP, per window).
+  const accountRegisterLimiter = new RateLimiter({ maxEvents: 3, windowMs: 60 * 60 * 1000 });
+  const accountLoginLimiter = new RateLimiter({ maxEvents: 5, windowMs: 60 * 60 * 1000 });
+  const accountOtpSendLimiter = new RateLimiter({ maxEvents: 10, windowMs: 60 * 60 * 1000 });
 
   // ── HTTP plumbing ──────────────────────────────────────────────────
 
@@ -238,6 +264,35 @@ export function createVerificationServer(
     return m ? m[1].trim() : '';
   }
 
+  /** Parse the priestate_sid cookie from the request's Cookie header. */
+  function parseSessionCookie(req: http.IncomingMessage): string | null {
+    const cookieHeader = req.headers.cookie ?? '';
+    const match = /(?:^|;\s*)priestate_sid=([^;]+)/.exec(cookieHeader);
+    return match ? match[1] : null;
+  }
+
+  /**
+   * Validate the session cookie. Returns `{ accountId, walletAddress }` if
+   * valid, otherwise sends a 401 response and returns null.
+   */
+  function requireAuth(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): { accountId: string; walletAddress: string } | null {
+    const token = parseSessionCookie(req);
+    if (!token) {
+      sendJson(res, 401, { ok: false, reason: 'unauthorized', message: 'Login required.' });
+      return null;
+    }
+    const session = sessionService.get(token);
+    if (!session) {
+      res.setHeader('Set-Cookie', SessionService.clearCookieHeader(config.account?.sessionSecure ?? true));
+      sendJson(res, 401, { ok: false, reason: 'session-expired', message: 'Session expired. Please log in again.' });
+      return null;
+    }
+    return { accountId: session.accountId, walletAddress: session.walletAddress };
+  }
+
   function unavailableResponse(feature: 'email' | 'aadhaar'): { error: 'unavailable'; message: string } {
     return feature === 'email'
       ? { error: 'unavailable', message: 'Verification service unavailable.' }
@@ -277,6 +332,17 @@ export function createVerificationServer(
 
     if (req.method === 'GET' && url === '/api/v1/account/capabilities') {
       sendJson(res, 200, { ok: true, ...accountService.capabilities });
+      return;
+    }
+
+    if (req.method === 'GET' && url === '/api/v1/account/me') {
+      routeAccountMe(req, res);
+      return;
+    }
+
+    // Logout works for both GET and POST for easy client integration.
+    if (url === '/api/v1/account/logout' && (req.method === 'GET' || req.method === 'POST')) {
+      routeAccountLogout(req, res);
       return;
     }
 
@@ -343,21 +409,21 @@ export function createVerificationServer(
       case '/api/v1/aadhaar-mobile/complete':
         return void (await routeAadhaarComplete(res, body));
       case '/api/v1/account/register':
-        return void (await routeAccountRegister(res, body));
+        return void (await routeAccountRegister(req, res, body));
       case '/api/v1/account/otp-sms/send':
-        return void (await routeAccountSmsSend(res, body));
+        return void (await routeAccountSmsSend(req, res));
       case '/api/v1/account/otp-sms/verify':
-        return void (await routeAccountSmsVerify(res, body));
+        return void (await routeAccountSmsVerify(req, res, body));
       case '/api/v1/account/otp-whatsapp/send':
-        return void (await routeAccountWhatsappSend(res, body));
+        return void (await routeAccountWhatsappSend(req, res));
       case '/api/v1/account/otp-whatsapp/verify':
-        return void (await routeAccountWhatsappVerify(res, body));
+        return void (await routeAccountWhatsappVerify(req, res, body));
       case '/api/v1/account/google/complete':
-        return void (await routeAccountGoogleComplete(res, body));
+        return void (await routeAccountGoogleComplete(req, res, body));
       case '/api/v1/account/identity-verified':
-        return void (await routeAccountIdentity(res, body));
+        return void (await routeAccountIdentity(req, res, body));
       case '/api/v1/account/login':
-        return void (await routeAccountLogin(res, body));
+        return void (await routeAccountLogin(req, res, body));
       default:
         sendJson(res, 404, { error: 'not-found' });
     }
@@ -403,26 +469,52 @@ export function createVerificationServer(
   /** OTP metadata without the raw code — the code is only sent to the device. */
 
   async function routeAccountRegister(
+    req: http.IncomingMessage,
     res: http.ServerResponse,
     body: JsonBody,
   ): Promise<void> {
+    // Rate limit: max 3 registrations per IP per hour.
+    const limit = accountRegisterLimiter.take(`ip:${clientIp(req)}`);
+    if (!limit.allowed) {
+      sendJson(res, 429, {
+        ok: false,
+        reason: 'rate-limited',
+        retryAfterMs: limit.retryAfterMs,
+        message: 'Too many registration attempts. Try again later.',
+      });
+      return;
+    }
     const result = accountService.register(body);
     if (!result.ok) {
       sendAccountError(res, result.reason);
       return;
     }
     if (!('view' in result)) return sendAccountError(res, 'internal');
+    // Create a session on successful registration so the user is logged in.
+    const { cookieHeader } = sessionService.create(result.view.accountId, result.view.walletAddress);
+    res.setHeader('Set-Cookie', cookieHeader);
     sendJson(res, 201, { ok: true, account: result.view });
   }
 
   async function routeAccountSmsSend(
+    req: http.IncomingMessage,
     res: http.ServerResponse,
-    body: JsonBody,
   ): Promise<void> {
-    const walletAddress = str(body, 'walletAddress');
-    const result = accountService.issueSmsOtp(walletAddress);
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    // Rate limit: max 10 OTP sends per IP per hour.
+    const limit = accountOtpSendLimiter.take(`ip:${clientIp(req)}`);
+    if (!limit.allowed) {
+      sendJson(res, 429, {
+        ok: false,
+        reason: 'rate-limited',
+        retryAfterMs: limit.retryAfterMs,
+        message: 'Too many OTP requests. Try again later.',
+      });
+      return;
+    }
+    const result = accountService.issueSmsOtp(auth.walletAddress);
     if (result.ok === true) {
-      // The raw code is NEVER returned to the client — it went to the device.
       sendJson(res, 200, { ok: true, channel: 'sms', expiresAt: result.expiresAt });
       return;
     }
@@ -438,16 +530,18 @@ export function createVerificationServer(
   }
 
   async function routeAccountSmsVerify(
+    req: http.IncomingMessage,
     res: http.ServerResponse,
     body: JsonBody,
   ): Promise<void> {
-    const walletAddress = str(body, 'walletAddress');
+    const auth = requireAuth(req, res);
+    if (!auth) return;
     const code = str(body, 'code').trim();
     if (!/^\d{6}$/.test(code)) {
       sendJson(res, 400, { ok: false, reason: 'invalid', message: 'Enter the 6-digit code.' });
       return;
     }
-    const result = accountService.verifySmsOtp(walletAddress, code);
+    const result = accountService.verifySmsOtp(auth.walletAddress, code);
     if (result.ok === true) {
       sendJson(res, 200, { ok: true, channel: 'sms' });
       return;
@@ -460,11 +554,22 @@ export function createVerificationServer(
   }
 
   async function routeAccountWhatsappSend(
+    req: http.IncomingMessage,
     res: http.ServerResponse,
-    body: JsonBody,
   ): Promise<void> {
-    const walletAddress = str(body, 'walletAddress');
-    const result = accountService.issueWhatsappOtp(walletAddress);
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const limit = accountOtpSendLimiter.take(`ip:${clientIp(req)}`);
+    if (!limit.allowed) {
+      sendJson(res, 429, {
+        ok: false,
+        reason: 'rate-limited',
+        retryAfterMs: limit.retryAfterMs,
+        message: 'Too many OTP requests. Try again later.',
+      });
+      return;
+    }
+    const result = accountService.issueWhatsappOtp(auth.walletAddress);
     if (result.ok === true) {
       sendJson(res, 200, { ok: true, channel: 'whatsapp', expiresAt: result.expiresAt });
       return;
@@ -481,16 +586,18 @@ export function createVerificationServer(
   }
 
   async function routeAccountWhatsappVerify(
+    req: http.IncomingMessage,
     res: http.ServerResponse,
     body: JsonBody,
   ): Promise<void> {
-    const walletAddress = str(body, 'walletAddress');
+    const auth = requireAuth(req, res);
+    if (!auth) return;
     const code = str(body, 'code').trim();
     if (!/^\d{6}$/.test(code)) {
       sendJson(res, 400, { ok: false, reason: 'invalid', message: 'Enter the 6-digit code.' });
       return;
     }
-    const result = accountService.verifyWhatsappOtp(walletAddress, code);
+    const result = accountService.verifyWhatsappOtp(auth.walletAddress, code);
     if (result.ok === true) {
       sendJson(res, 200, { ok: true, channel: 'whatsapp' });
       return;
@@ -503,12 +610,14 @@ export function createVerificationServer(
   }
 
   async function routeAccountGoogleComplete(
+    req: http.IncomingMessage,
     res: http.ServerResponse,
     body: JsonBody,
   ): Promise<void> {
-    const walletAddress = str(body, 'walletAddress');
+    const auth = requireAuth(req, res);
+    if (!auth) return;
     const authCode = str(body, 'authCode');
-    const result = accountService.completeGoogle(walletAddress, authCode);
+    const result = accountService.completeGoogle(auth.walletAddress, authCode);
     if (!result.ok) {
       sendAccountError(res, result.reason);
       return;
@@ -518,12 +627,14 @@ export function createVerificationServer(
   }
 
   async function routeAccountIdentity(
+    req: http.IncomingMessage,
     res: http.ServerResponse,
     body: JsonBody,
   ): Promise<void> {
-    const walletAddress = str(body, 'walletAddress');
+    const auth = requireAuth(req, res);
+    if (!auth) return;
     const confirmed = body.confirmed === true;
-    const result = accountService.markIdentityVerified(walletAddress, confirmed);
+    const result = accountService.markIdentityVerified(auth.walletAddress, confirmed);
     if (!result.ok) {
       sendAccountError(res, result.reason);
       return;
@@ -533,9 +644,21 @@ export function createVerificationServer(
   }
 
   async function routeAccountLogin(
+    req: http.IncomingMessage,
     res: http.ServerResponse,
     body: JsonBody,
   ): Promise<void> {
+    // Rate limit: max 5 login attempts per IP per hour.
+    const limit = accountLoginLimiter.take(`ip:${clientIp(req)}`);
+    if (!limit.allowed) {
+      sendJson(res, 429, {
+        ok: false,
+        reason: 'rate-limited',
+        retryAfterMs: limit.retryAfterMs,
+        message: 'Too many login attempts. Try again later.',
+      });
+      return;
+    }
     const walletAddress = str(body, 'walletAddress');
     const password = str(body, 'password');
     const result = accountService.login({ walletAddress, password });
@@ -544,7 +667,36 @@ export function createVerificationServer(
       return;
     }
     if (!('session' in result)) return sendAccountError(res, 'internal');
+    // Create a server-side session and set the HttpOnly cookie.
+    const { cookieHeader } = sessionService.create(result.session.accountId, walletAddress);
+    res.setHeader('Set-Cookie', cookieHeader);
     sendJson(res, 200, { ok: true, session: result.session });
+  }
+
+  /** Return the current authenticated account (requires a valid session). */
+  function routeAccountMe(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): void {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const record = persistentAccountStore.getByWallet(auth.walletAddress);
+    if (!record) {
+      sendJson(res, 404, { ok: false, reason: 'not-found' });
+      return;
+    }
+    sendJson(res, 200, { ok: true, account: { accountId: record.accountId, walletAddress: record.walletAddress } });
+  }
+
+  /** End the current session (logout). */
+  function routeAccountLogout(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): void {
+    const token = parseSessionCookie(req);
+    if (token) sessionService.destroy(token);
+    res.setHeader('Set-Cookie', SessionService.clearCookieHeader(config.account?.sessionSecure ?? true));
+    sendJson(res, 200, { ok: true });
   }
 
   async function routeEmailSend(
@@ -784,9 +936,26 @@ export function createVerificationServer(
   return {
     server,
     port: config.port,
+    sessions: sessionService,
     close: () =>
-      new Promise((resolve, reject) => {
-        server.close((err) => (err ? reject(err) : resolve()));
+      new Promise<void>((resolve, reject) => {
+        server.close((err) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          // Close the persistent SQLite connection (no-op for in-memory seams).
+          try {
+            if (persistentAccountStore instanceof SqliteAccountStore) {
+              persistentAccountStore.close();
+            } else if (overrides.db) {
+              overrides.db.close();
+            }
+          } catch {
+            /* ignore close errors */
+          }
+          resolve();
+        });
       }),
   };
 }

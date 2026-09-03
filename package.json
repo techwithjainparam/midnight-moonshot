@@ -40,6 +40,7 @@
     "@midnight-ntwrk/wallet-sdk": "1.2.0",
     "@scure/base": "^2.3.0",
     "@scure/bip39": "2.2.0",
+    "better-sqlite3": "^13.0.3",
     "buffer": "^6.0.3",
     "nodemailer": "^9.0.5",
     "react": "^19.2.0",
@@ -52,6 +53,7 @@
     "ws": "^8.21.1"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.0.0",
     "@types/nodemailer": "^8.0.1",
     "@types/react": "^19.2.0",

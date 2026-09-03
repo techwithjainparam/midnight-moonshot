@@ -54,12 +54,18 @@ export interface ServerConfig {
      * closed; PII is never persisted plainly).
      */
     readonly encryptionSecret: string;
+    /** Absolute or CWD-relative path to the SQLite database file. */
+    readonly dbPath: string;
     /** True when a real SMS gateway is configured (else SMS OTP is unavailable). */
     readonly smsConfigured: boolean;
     /** True when a real WhatsApp gateway API is configured (else unavailable). */
     readonly whatsappConfigured: boolean;
     /** True when a real Google OAuth client is configured (else unavailable). */
     readonly googleConfigured: boolean;
+    /** Session cookie TTL in ms (default 24h). */
+    readonly sessionTtlMs: number;
+    /** Whether to set the Secure flag on session cookies (default true). */
+    readonly sessionSecure: boolean;
   };
 }
 
@@ -106,9 +112,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     },
     account: {
       encryptionSecret: env.ACCOUNT_ENC_SECRET?.trim() ?? '',
+      dbPath: env.ACCOUNT_DB_PATH?.trim() ?? '',
       smsConfigured: env.SMS_GATEWAY_PROVIDER?.trim() !== '',
       whatsappConfigured: env.WHATSAPP_GATEWAY_API_TOKEN?.trim() !== '',
       googleConfigured: env.GOOGLE_CLIENT_ID?.trim() !== '' && env.GOOGLE_CLIENT_SECRET?.trim() !== '',
+      sessionTtlMs: intEnv('ACCOUNT_SESSION_TTL_HOURS', 24) * 60 * 60 * 1000,
+      sessionSecure: env.ACCOUNT_SESSION_SECURE !== 'false',
     },
     aadhaarKyc: {
       providerName: env.AADHAAR_KYC_PROVIDER?.trim() ?? '',

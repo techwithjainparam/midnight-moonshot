@@ -23,6 +23,12 @@ midnight-level-db/
 *.seed
 *.mnemonic
 
+# SQLite database files (account persistence)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
 # Editor / OS
 .vscode/
 .idea/
