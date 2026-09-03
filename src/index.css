@@ -4320,6 +4320,20 @@ select.form-input {
   background: rgba(124, 168, 255, 0.08);
 }
 
+/* ── Login authentication (Level 3 Part 5) ───────────────────────── */
+.spinner-inline {
+  display: inline-block;
+  width: 0.8rem;
+  height: 0.8rem;
+  margin-left: 0.4rem;
+  vertical-align: middle;
+  border-radius: 50%;
+  border: 1.5px solid transparent;
+  border-top-color: var(--color-accent, #6f7dff);
+  border-right-color: var(--color-accent, #6f7dff);
+  animation: spin 0.9s linear infinite;
+}
+
 /* ── Registration authentication stepper (Level 3 Part 3) ───────── */
 .registration-steps {
   display: flex;

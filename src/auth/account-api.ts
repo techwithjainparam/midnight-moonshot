@@ -7,7 +7,7 @@
 // surfaces an honest `unavailable` state — it never fakes a factor.
 
 import { verificationApiBase } from '../profile/providers/backend-providers';
-import type { AccountCapabilities, PublicAccountView, RegistrationSnapshot } from './account-types';
+import type { AccountCapabilities, LoginSnapshot, PublicAccountView, RegistrationSnapshot } from './account-types';
 
 export type AccountApiResult<T> =
   | { ok: true; data: T }
@@ -126,11 +126,18 @@ export function completeGoogleWithState(
 export interface AccountExistence {
   readonly exists: boolean;
   readonly registration: RegistrationSnapshot | null;
+  /** Safe login factor snapshot (null for an unknown wallet). */
+  readonly login: LoginSnapshot | null;
 }
 
 /** Authoritative existence + registration-state check for a wallet. */
 export function checkAccountExists(walletAddress: string): Promise<AccountApiResult<AccountExistence>> {
   return api('/v1/account/exists', { walletAddress });
+}
+
+/** Safe, server-authoritative login factor snapshot for a wallet. */
+export function fetchLoginState(walletAddress: string): Promise<AccountApiResult<{ exists: boolean; login: LoginSnapshot | null }>> {
+  return api('/v1/account/login/state', { walletAddress });
 }
 
 export function markIdentityVerified(walletAddress: string, confirmed: boolean): Promise<AccountApiResult<{ account: PublicAccountView }>> {

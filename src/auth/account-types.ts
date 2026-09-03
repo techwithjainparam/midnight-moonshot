@@ -65,6 +65,73 @@ export function isRegistrationComplete(snap: RegistrationSnapshot | null): boole
   return Boolean(snap && snap.complete);
 }
 
+// ── Login state machine (Level 3 Part 5) ─────────────────────────────
+//
+// The login flow is a SEQUENTIAL, REQUIRED factor state machine (the client
+// mirror of server/account/login-state.ts):
+//
+//   wallet → google → sms → whatsapp → complete
+//
+//   * wallet   verified the moment an account exists for the connected wallet,
+//   * google   real OAuth provider (wallet-bound state + nonce),
+//   * sms      SMS OTP (server-generated, hashed, short-lived, single-use),
+//   * whatsapp WhatsApp OTP (same security contract),
+//   * complete terminal step: ONLY once every required factor holds does the
+//              server mint an authenticated session. The client never decides
+//              authentication; the server is authoritative.
+
+/** Ordered login factor identifiers (excluding the terminal Complete). */
+export type LoginFactor = 'wallet' | 'google' | 'sms' | 'whatsapp';
+
+export const LOGIN_FACTOR_ORDER: readonly LoginFactor[] = [
+  'wallet',
+  'google',
+  'sms',
+  'whatsapp',
+];
+
+export const LOGIN_FACTOR_LABELS: Record<LoginFactor, string> = {
+  wallet: 'Wallet',
+  google: 'Google',
+  sms: 'SMS OTP',
+  whatsapp: 'WhatsApp OTP',
+};
+
+/** Server-authoritative login factor state (mirror of the server projection). */
+export interface LoginSnapshot {
+  readonly walletVerified: boolean;
+  readonly googleVerified: boolean;
+  readonly smsVerified: boolean;
+  readonly whatsappVerified: boolean;
+  /** True when every REQUIRED login factor holds (ready for Complete). */
+  readonly allFactorsReady: boolean;
+  readonly nextPendingFactor: LoginFactor | null;
+  readonly pendingStep: string | null;
+}
+
+export function snapshotLoginFactorState(
+  snap: LoginSnapshot | null,
+): Record<LoginFactor, boolean> {
+  const empty: Record<LoginFactor, boolean> = {
+    wallet: false,
+    google: false,
+    sms: false,
+    whatsapp: false,
+  };
+  if (!snap) return empty;
+  return {
+    wallet: snap.walletVerified,
+    google: snap.googleVerified,
+    sms: snap.smsVerified,
+    whatsapp: snap.whatsappVerified,
+  };
+}
+
+/** True only when every required login factor holds (ready for Complete). */
+export function isLoginReady(snap: LoginSnapshot | null): boolean {
+  return Boolean(snap && snap.allFactorsReady);
+}
+
 /** Public-safe account view returned by the server (never holds raw PII). */
 export interface PublicAccountView {
   readonly accountId: string;

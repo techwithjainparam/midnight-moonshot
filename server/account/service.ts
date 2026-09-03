@@ -30,6 +30,11 @@ import {
   type RegistrationSnapshot,
 } from './registration-state.js';
 import {
+  deriveLoginState,
+  type LoginFactor,
+  type LoginSnapshot,
+} from './login-state.js';
+import {
   parseAccountRegistration,
   type AccountRecord,
   type PublicAccountView,
@@ -358,6 +363,19 @@ export class AccountService {
    */
   hasAccount(walletAddress: string): boolean {
     return this.store.getByWallet(walletAddress) !== null;
+  }
+
+  /**
+   * Expose the login factor state machine for an account. Returns null when no
+   * account exists (no PII is revealed either way). Mirrors registrationState
+   * but framed as the login factor sequence (wallet → google → sms → whatsapp).
+   */
+  loginState(
+    walletAddress: string,
+    requiredFactors?: readonly LoginFactor[],
+  ): LoginSnapshot | null {
+    const record = this.store.getByWallet(walletAddress);
+    return deriveLoginState(record, { requiredFactors });
   }
 
   /**

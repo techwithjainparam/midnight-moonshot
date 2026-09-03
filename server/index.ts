@@ -424,6 +424,8 @@ export function createVerificationServer(
         return void (await routeAccountGoogleComplete(req, res, body));
       case '/api/v1/account/exists':
         return void routeAccountExists(res, body);
+      case '/api/v1/account/login/state':
+        return void routeAccountLoginState(res, body);
       case '/api/v1/account/identity-verified':
         return void (await routeAccountIdentity(req, res, body));
       case '/api/v1/account/login':
@@ -684,7 +686,28 @@ export function createVerificationServer(
     }
     const exists = accountService.hasAccount(walletAddress);
     const registration = accountService.registrationState(walletAddress);
-    sendJson(res, 200, { ok: true, exists, registration });
+    const login = accountService.loginState(walletAddress);
+    sendJson(res, 200, { ok: true, exists, registration, login });
+  }
+
+  /**
+   * Server-authoritative login-state endpoint (Level 3 Part 5). Returns the
+   * safe login factor snapshot { ok, exists, login }. An unknown wallet yields
+   * exists:false with a null login — no account is ever created here and no
+   * session is minted. Never returns password, OTP, token, or PII.
+   */
+  function routeAccountLoginState(
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): void {
+    const walletAddress = str(body, 'walletAddress');
+    if (!/^0x[a-fA-F0-9]{64}$/.test(walletAddress)) {
+      sendJson(res, 400, { ok: false, reason: 'invalid-input' });
+      return;
+    }
+    const exists = accountService.hasAccount(walletAddress);
+    const login = accountService.loginState(walletAddress);
+    sendJson(res, 200, { ok: true, exists, login });
   }
 
   async function routeAccountIdentity(
