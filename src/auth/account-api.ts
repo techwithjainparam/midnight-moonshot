@@ -7,7 +7,7 @@
 // surfaces an honest `unavailable` state — it never fakes a factor.
 
 import { verificationApiBase } from '../profile/providers/backend-providers';
-import type { AccountCapabilities, LoginSnapshot, PublicAccountView, RegistrationSnapshot } from './account-types';
+import type { AccountCapabilities, FaceVerificationSnapshot, LoginSnapshot, PublicAccountView, RegistrationSnapshot } from './account-types';
 
 export type AccountApiResult<T> =
   | { ok: true; data: T }
@@ -62,6 +62,7 @@ export async function fetchAccountCapabilities(): Promise<AccountApiResult<Accou
         smsConfigured: payload.smsConfigured === true,
         whatsappConfigured: payload.whatsappConfigured === true,
         googleConfigured: payload.googleConfigured === true,
+        faceVerificationConfigured: payload.faceVerificationConfigured === true,
       },
     };
   } catch {
@@ -138,6 +139,18 @@ export function checkAccountExists(walletAddress: string): Promise<AccountApiRes
 /** Safe, server-authoritative login factor snapshot for a wallet. */
 export function fetchLoginState(walletAddress: string): Promise<AccountApiResult<{ exists: boolean; login: LoginSnapshot | null }>> {
   return api('/v1/account/login/state', { walletAddress });
+}
+
+/**
+ * Server-authoritative LOGIN FACE-VERIFICATION stage snapshot for a wallet
+ * (Level 3 Part 6). Fail-closed: the server accepts NO self-affirmed "matched"
+ * boolean and returns only booleans — never a face, embedding, or biometric
+ * value.
+ */
+export function fetchFaceVerificationState(
+  walletAddress: string,
+): Promise<AccountApiResult<{ faceVerification: FaceVerificationSnapshot }>> {
+  return api('/v1/account/login/face-verification', { walletAddress });
 }
 
 export function markIdentityVerified(walletAddress: string, confirmed: boolean): Promise<AccountApiResult<{ account: PublicAccountView }>> {

@@ -12,6 +12,12 @@ export interface AccountCapabilities {
   readonly smsConfigured: boolean;
   readonly whatsappConfigured: boolean;
   readonly googleConfigured: boolean;
+  /**
+   * Whether a real computer-vision face-verification provider is configured.
+   * This build ships none, so the login face stage reports unavailable and
+   * fails closed.
+   */
+  readonly faceVerificationConfigured: boolean;
 }
 
 /** Registration authentication factor steps, in canonical order. */
@@ -130,6 +136,47 @@ export function snapshotLoginFactorState(
 /** True only when every required login factor holds (ready for Complete). */
 export function isLoginReady(snap: LoginSnapshot | null): boolean {
   return Boolean(snap && snap.allFactorsReady);
+}
+
+// ── Login face-verification stage (Level 3 Part 6) ───────────────────
+//
+// The LOGIN FACE-VERIFICATION stage is an explicit, server-authoritative
+// identity step SUBSEQUENT to the five-factor login — it is distinct from the
+// motion-only liveness stage (Part 4) and from the google/sms/whatsapp
+// factors. It can never be self-affirmed by the client and can never silently
+// succeed: a real CV provider AND a registered reference identity must both
+// exist, else the stage fails closed to `verification_unavailable`.
+//
+// Privacy: only booleans are ever projected here — never a face, embedding,
+// image, Aadhaar number, or biometric value.
+
+/** Server-authoritative face-verification stage snapshot (mirror of server). */
+export interface FaceVerificationSnapshot {
+  /** Login cannot complete without this subsequent identity stage. */
+  readonly required: boolean;
+  /** True only when a real computer-vision provider is available. */
+  readonly providerAvailable: boolean;
+  /** True only when a legitimate registered reference identity exists. */
+  readonly hasReferenceIdentity: boolean;
+}
+
+/** True only when the face-verification stage can actually run a match. */
+export function isFaceVerificationCapable(
+  snap: FaceVerificationSnapshot | null,
+): boolean {
+  return Boolean(snap && snap.providerAvailable && snap.hasReferenceIdentity);
+}
+
+/** Human, honest label for the stage when capability is missing. */
+export function faceVerificationStatus(snap: FaceVerificationSnapshot | null): string {
+  if (!snap) return 'Identity verification is required.';
+  if (snap.providerAvailable && snap.hasReferenceIdentity) {
+    return 'Biometric face matching is available for this account.';
+  }
+  if (snap.providerAvailable && !snap.hasReferenceIdentity) {
+    return 'A face-verification provider is available, but no registered reference identity exists for this account yet.';
+  }
+  return 'Biometric face matching is not available in this build — no real computer-vision provider is configured. Verification cannot be faked and will fail closed.';
 }
 
 /** Public-safe account view returned by the server (never holds raw PII). */

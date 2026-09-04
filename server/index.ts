@@ -426,6 +426,8 @@ export function createVerificationServer(
         return void routeAccountExists(res, body);
       case '/api/v1/account/login/state':
         return void routeAccountLoginState(res, body);
+      case '/api/v1/account/login/face-verification':
+        return void routeAccountFaceVerification(res, body);
       case '/api/v1/account/identity-verified':
         return void (await routeAccountIdentity(req, res, body));
       case '/api/v1/account/login':
@@ -708,6 +710,33 @@ export function createVerificationServer(
     const exists = accountService.hasAccount(walletAddress);
     const login = accountService.loginState(walletAddress);
     sendJson(res, 200, { ok: true, exists, login });
+  }
+
+  /**
+   * Server-authoritative LOGIN FACE-VERIFICATION stage endpoint (Level 3
+   * Part 6). Returns the honest, FAIL-CLOSED identity-stage snapshot
+   * { ok, faceVerification }: `required` is always true (it is a mandatory
+   * subsequent identity step), while `providerAvailable` and
+   * `hasReferenceIdentity` are false in this build because no real CV provider
+   * and no registered biometric reference exist. It NEVER accepts or records a
+   * self-affirmed client "matched" boolean, so no fabricated face match can
+   * ever be used to mint a session.
+   */
+  function routeAccountFaceVerification(
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): void {
+    const walletAddress = str(body, 'walletAddress');
+    if (!/^0x[a-fA-F0-9]{64}$/.test(walletAddress)) {
+      sendJson(res, 400, { ok: false, reason: 'invalid-input' });
+      return;
+    }
+    const faceVerification = accountService.faceVerificationState(walletAddress);
+    if (!faceVerification) {
+      sendJson(res, 404, { ok: false, reason: 'not-found' });
+      return;
+    }
+    sendJson(res, 200, { ok: true, faceVerification });
   }
 
   async function routeAccountIdentity(

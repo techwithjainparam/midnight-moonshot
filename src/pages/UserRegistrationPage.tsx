@@ -112,7 +112,7 @@ export default function UserRegistrationPage() {
     let cancelled = false;
     fetchAccountCapabilities().then((r) => {
       if (cancelled) return;
-      setCaps(r.ok ? r.data : { smsConfigured: false, whatsappConfigured: false, googleConfigured: false });
+      setCaps(r.ok ? r.data : { smsConfigured: false, whatsappConfigured: false, googleConfigured: false, faceVerificationConfigured: false });
       setCapsLoaded(true);
     });
     return () => { cancelled = true; };

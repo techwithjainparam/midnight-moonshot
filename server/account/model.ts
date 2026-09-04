@@ -55,6 +55,24 @@ export interface PublicAccountView {
   readonly createdAt: number;
 }
 
+/**
+ * Server-authoritative LOGIN FACE-VERIFICATION stage snapshot (Level 3 Part 6).
+ * This is the SECOND, subsequent identity stage on top of the five-factor
+ * login. It is SEPARATE from liveness and NEVER self-affirmed by the client.
+ * The current build ships no real CV provider and stores no biometric
+ * reference, so `providerAvailable` and `hasReferenceIdentity` are always
+ * false. Only a genuine provider + a registered reference in a secure
+ * private boundary can set these — never a client boolean.
+ */
+export interface FaceVerificationSnapshot {
+  /** Login cannot complete without this subsequent identity stage. */
+  readonly required: boolean;
+  /** True only when a real computer-vision provider is available. */
+  readonly providerAvailable: boolean;
+  /** True only when a legitimate registered reference identity exists. */
+  readonly hasReferenceIdentity: boolean;
+}
+
 /** The on-disk / in-store account record. */
 export interface AccountRecord {
   readonly accountId: string;

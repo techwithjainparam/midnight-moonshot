@@ -2,8 +2,9 @@ import { useState, useCallback, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import ProductBanner from '../components/ProductBanner';
 import LoginStepper from '../components/LoginStepper';
+import LoginFaceVerification from '../components/LoginFaceVerification';
 import { useAuth } from '../auth/AuthContext';
-import type { AccountCapabilities, LoginSnapshot, LoginFactor } from '../auth/account-types';
+import type { AccountCapabilities, FaceVerificationSnapshot, LoginSnapshot, LoginFactor } from '../auth/account-types';
 import { isLoginReady } from '../auth/account-types';
 import {
   loginAccount,
@@ -14,6 +15,7 @@ import {
   completeGoogle,
   fetchAccountCapabilities,
   fetchLoginState,
+  fetchFaceVerificationState,
 } from '../auth/account-api';
 import { getAccount, isAccountFullyVerified } from '../auth/account-store';
 
@@ -61,16 +63,31 @@ export default function LoginPage() {
   const [loginError, setLoginError] = useState<string | null>(null);
   const [factorError, setFactorError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Server-authoritative subsequent identity (face) verification stage.
+  const [faceSnap, setFaceSnap] = useState<FaceVerificationSnapshot | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     fetchAccountCapabilities().then((r) => {
       if (cancelled) return;
-      setCaps(r.ok ? r.data : { smsConfigured: false, whatsappConfigured: false, googleConfigured: false });
+      setCaps(r.ok ? r.data : { smsConfigured: false, whatsappConfigured: false, googleConfigured: false, faceVerificationConfigured: false });
       setCapsLoaded(true);
     });
     return () => { cancelled = true; };
   }, []);
+
+  // Fetch the honest, server-authoritative face-verification stage for this
+  // wallet whenever a wallet is connected and an account exists.
+  useEffect(() => {
+    if (!address) return;
+    let cancelled = false;
+    fetchFaceVerificationState(address).then((r) => {
+      if (cancelled) return;
+      setFaceSnap(r.ok ? r.data.faceVerification : null);
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [address]);
 
   // On connect, run the authoritative check phase.
   useEffect(() => {
@@ -305,6 +322,17 @@ export default function LoginPage() {
           completing={phase === 'complete'}
           message={factorError}
         />
+
+        {/* ── Subsequent identity stage: face verification (Part 6) ─── */}
+        <section className="account-section">
+          <h2 className="account-section-title">Identity verification (face)</h2>
+          <p className="account-section-desc">
+            After the login factors, verifying your identity with your face is a
+            separate, explicit step. It is independent of the password login below and is
+            never silently treated as a login factor.
+          </p>
+          <LoginFaceVerification snapshot={faceSnap} />
+        </section>
 
         {/* ── Pending factors ─────────────────────────────────────── */}
         {!allReady && nextFactor === 'google' && (

@@ -410,6 +410,58 @@ browser:
   no demo fallback in the production flow. (A development mock remains only
   for automated tests.)
 
+### Login face verification (Level 3 Part 6) — implementation status
+
+The **login** flow runs a mandatory five-factor authentication
+(Wallet → Google → SMS OTP → WhatsApp OTP → Password) and then a distinct,
+explicit **login face-verification identity stage** on top. This stage is
+deliberately separate from the motion-only **liveness** check used during
+registration:
+
+* **Liveness** (Part 4) answers *"is a real, live person in front of the
+  camera?"* using in-memory motion evaluation.
+* **Face matching** (Part 6) answers *"does the live face match a registered
+  identity reference?"* — a separate biometric capability. Motion alone is
+  never treated as a face match, and a successful identity-verification stage
+  is never silently treated as a login factor.
+
+Accurate status of the current build:
+
+**REAL (implemented):**
+* Camera access where the device supports it (`src/liveness/camera-capture.ts`).
+* Part 4 motion-based liveness foundation.
+* An explicit login face-verification state machine
+  (`src/liveness/login-face-machine.ts`) whose **only** path to
+  `identity_verified` is a real provider `verification_result` of `matched` —
+  there is no event that sets "matched = true" directly.
+* Provider capability discovery (`src/liveness/face-verification.ts`).
+* Fail-closed behavior: absent capability or absent reference, the stage
+  reports `verification_unavailable` and never silently succeeds.
+* Honest UI (`src/components/LoginFaceVerification.tsx`) that distinguishes
+  camera requesting/ready, liveness, face verification, passed, mismatch,
+  insufficient quality, no face, multiple faces, camera denied/unavailable,
+  provider unavailable, error, and timeout/cancel.
+* Privacy boundaries: camera frames stay in memory; no face, embedding, or
+  biometric value reaches the ledger, URLs, query params, logs, localStorage,
+  or any public/account response (the server exposes only booleans).
+* Server-authoritative authentication: `AccountService.login()` (password +
+  factors + `identityVerified`) remains the only path that mints a session;
+  no client self-affirmed face match can mint one.
+
+**PROVIDER-READY / NOT CURRENTLY AVAILABLE in this build**
+(no real CV library is bundled and no secure registered reference exists):
+* Actual face detection / eye-blink / head-turn / gesture recognition.
+* Face embeddings and biometric face matching.
+* A secure, server-side registered biometric reference.
+* Official Aadhaar identity verification (NDJSON: `src/verify/face-match.ts`
+  is **demo-only** and is NOT a legitimate registered biometric reference).
+
+Because no provider and no reference identity exist, the login face stage
+honestly ends in `verification_unavailable` — it does **not** fake completion.
+A real computer-vision provider + a secure reference store can be wired in
+later behind the `FaceVerificationProvider` boundary without touching the
+machine, the UI, or the session gate.
+
 ### Running it
 
 ```bash

@@ -38,6 +38,7 @@ import {
   parseAccountRegistration,
   type AccountRecord,
   type PublicAccountView,
+  type FaceVerificationSnapshot,
   maskAadhaar,
 } from './model.js';
 import { toPublicAccountView } from './model.js';
@@ -142,11 +143,20 @@ export class AccountService {
     smsConfigured: boolean;
     whatsappConfigured: boolean;
     googleConfigured: boolean;
+    /**
+     * Whether a real computer-vision face-verification provider is available
+     * AND an account can hold a legitimate reference. This build ships NO such
+     * provider and stores NO biometric reference, so this is always false —
+     * the login face stage fails closed to `verification_unavailable`. The
+     * boundary stays ready for a real provider.
+     */
+    faceVerificationConfigured: boolean;
   } {
     return {
       smsConfigured: this.smsConfigured,
       whatsappConfigured: this.whatsappConfigured,
       googleConfigured: this.googleConfigured,
+      faceVerificationConfigured: false,
     };
   }
 
@@ -376,6 +386,35 @@ export class AccountService {
   ): LoginSnapshot | null {
     const record = this.store.getByWallet(walletAddress);
     return deriveLoginState(record, { requiredFactors });
+  }
+
+  /**
+   * Expose the LOGIN FACE-VERIFICATION stage state for an account (Level 3
+   * Part 6). This is the SECOND, subsequent identity-verification stage on top
+   * of the five-factor login — it is a distinct evalu-ation from liveness.
+   *
+   * The boundary is HONEST and FAIL-CLOSED:
+   *   * `providerAvailable` is true only when a real CV provider exists. This
+   *     build ships none, so it is always false.
+   *   * `hasReferenceIdentity` is true only when the account holds a real
+   *     registered biometric reference in a secure private boundary. This
+   *     build stores NO biometric material (the Part 4 demo match is client
+   *     and transient), so it is always false.
+   *   * `required` is always true for login: the stage is a mandatory identity
+   *     step and can never be silently skipped by the client.
+   * No self-affirmed "face matched" success is accepted — there is no server
+   * path that records one from a client boolean. Returns null when the account
+   * does not exist.
+   */
+  faceVerificationState(
+    walletAddress: string,
+  ): FaceVerificationSnapshot | null {
+    if (!this.store.getByWallet(walletAddress)) return null;
+    return {
+      required: true,
+      providerAvailable: false, // no real CV provider in this build
+      hasReferenceIdentity: false, // no biometric reference stored
+    };
   }
 
   /**
