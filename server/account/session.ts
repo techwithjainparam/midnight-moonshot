@@ -49,11 +49,14 @@ export interface SessionServiceConfig {
   readonly secure?: boolean;
   /** Session lifetime in ms. Default 24h. */
   readonly ttlMs?: number;
+  /** Cookie SameSite policy (default Lax). */
+  readonly sameSite?: 'Lax' | 'Strict' | 'None';
 }
 
 export class SessionService {
   private readonly ttlMs: number;
   private readonly secure: boolean;
+  private readonly sameSite: 'Lax' | 'Strict' | 'None';
   private readonly insertStmt: Database.Statement;
   private readonly selectStmt: Database.Statement;
   private readonly deleteStmt: Database.Statement;
@@ -62,7 +65,9 @@ export class SessionService {
 
   constructor(db: Database.Database, config: SessionServiceConfig = {}) {
     this.ttlMs = config.ttlMs ?? DEFAULT_SESSION_TTL_MS;
-    this.secure = config.secure ?? true;
+    // SameSite=None cookies are only honored over HTTPS — force Secure on.
+    this.sameSite = config.sameSite ?? 'Lax';
+    this.secure = this.sameSite === 'None' ? true : (config.secure ?? true);
 
     this.insertStmt = db.prepare(`
       INSERT INTO sessions (session_id, account_id, wallet_address, created_at, expires_at)
@@ -109,7 +114,7 @@ export class SessionService {
       `${SESSION_COOKIE_NAME}=${sessionId}`,
       'HttpOnly',
       'Path=/',
-      `SameSite=Lax`,
+      `SameSite=${this.sameSite}`,
       this.secure ? 'Secure' : '',
       `Max-Age=${Math.floor(this.ttlMs / 1000)}`,
     ]
@@ -147,12 +152,12 @@ export class SessionService {
   }
 
   /** Build a Set-Cookie header that clears the session cookie. */
-  static clearCookieHeader(secure = true): string {
+  static clearCookieHeader(secure = true, sameSite: 'Lax' | 'Strict' | 'None' = 'Lax'): string {
     return [
       `${SESSION_COOKIE_NAME}=`,
       'HttpOnly',
       'Path=/',
-      'SameSite=Lax',
+      `SameSite=${sameSite}`,
       secure ? 'Secure' : '',
       'Max-Age=0',
     ]

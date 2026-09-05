@@ -51,6 +51,15 @@ interface ApiErrorBody {
   error?: string;
 }
 
+/**
+ * POST JSON to the verification API.
+ *
+ * `credentials: 'include'` sends the `priestate_sid` session cookie on
+ * cross-origin (Vercel frontend → API) requests. This is SAFE because the
+ * API only reflects credentials to its strict CORS allow-list (it never
+ * echoes `Access-Control-Allow-Origin: *`), so cookies are never leaked to
+ * an arbitrary origin. Same-origin /api proxy requests are unchanged.
+ */
 async function apiPost(
   apiBase: string,
   path: string,
@@ -59,6 +68,7 @@ async function apiPost(
   try {
     const res = await fetch(`${apiBase}/api/${path}`, {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
@@ -177,7 +187,7 @@ export class BackendIdentityVerificationProvider implements IdentityVerification
   async isConfiguredOnServer(): Promise<boolean> {
     if (this.availability !== null) return this.availability;
     try {
-      const res = await fetch(`${this.apiBase}/api/health`);
+      const res = await fetch(`${this.apiBase}/api/health`, { credentials: 'include' });
       if (!res.ok) throw new Error(`health ${res.status}`);
       const body: unknown = await res.json();
       this.availability =

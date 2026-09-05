@@ -20,11 +20,21 @@ interface ApiErrorBody {
   error?: string;
 }
 
+/**
+ * POST JSON to the account API.
+ *
+ * `credentials: 'include'` sends the `priestate_sid` session cookie on
+ * cross-origin (Vercel frontend → API) requests. This is SAFE only because
+ * the API reflects credentials exclusively to its strict CORS allow-list
+ * (never `Access-Control-Allow-Origin: *`). Same-origin /api proxy requests
+ * are unchanged.
+ */
 async function api<T>(path: string, body: unknown): Promise<AccountApiResult<T>> {
   const apiBase = verificationApiBase();
   try {
     const res = await fetch(`${apiBase}/api/${path}`, {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
@@ -53,7 +63,7 @@ async function api<T>(path: string, body: unknown): Promise<AccountApiResult<T>>
 export async function fetchAccountCapabilities(): Promise<AccountApiResult<AccountCapabilities>> {
   const apiBase = verificationApiBase();
   try {
-    const res = await fetch(`${apiBase}/api/v1/account/capabilities`);
+    const res = await fetch(`${apiBase}/api/v1/account/capabilities`, { credentials: 'include' });
     const payload = (await res.json()) as Record<string, unknown>;
     if (!res.ok) return { ok: false, reason: 'unavailable' };
     return {

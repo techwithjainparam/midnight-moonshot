@@ -83,6 +83,9 @@ export async function createApplicationMetadata(
   try {
     res = await fetch(`${apiBase}/api/v1/applications`, {
       method: 'POST',
+      // Send the priestate_sid session cookie on cross-origin requests; the
+      // API only reflects credentials to its strict CORS allow-list (never *).
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     });

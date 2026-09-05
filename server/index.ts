@@ -48,6 +48,7 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { loadConfig, type ServerConfig } from './config';
+import { resolveClientIp } from './lib/client-ip';
 import { OtpService } from './lib/otp-service';
 import { RateLimiter } from './lib/rate-limiter';
 import type { Mailer } from './lib/mailer';
@@ -206,6 +207,7 @@ export function createVerificationServer(
     new SessionService(db, {
       secure: config.account?.sessionSecure ?? true,
       ttlMs: config.account?.sessionTtlMs,
+      sameSite: config.account?.sessionSameSite,
     });
 
   // ── Real OAuth / delivery provider wiring (J.4) ─────────────────
@@ -330,10 +332,19 @@ export function createVerificationServer(
 
   let requestOrigin: string | undefined;
 
+  /**
+   * CORS for the Vercel frontend origin. Credentials (the `priestate_sid`
+   * cookie) are ONLY echoed to an explicitly allow-listed origin — never to
+   * an arbitrary Origin and never with `Access-Control-Allow-Origin: *`
+   * (which the browser forbids alongside credentials anyway). Cross-site
+   * cookie traffic therefore requires the matching SameSite=None+Secure
+   * session cookie, issued by the API over HTTPS.
+   */
   function corsHeaders(): Record<string, string> {
     if (requestOrigin && config.allowedOrigins.includes(requestOrigin)) {
       return {
         'Access-Control-Allow-Origin': requestOrigin,
+        'Access-Control-Allow-Credentials': 'true',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type',
         Vary: 'Origin',
@@ -353,7 +364,19 @@ export function createVerificationServer(
   }
 
   function clientIp(req: http.IncomingMessage): string {
-    return req.socket.remoteAddress ?? 'unknown';
+    const forwardedFor = req.headers['x-forwarded-for'];
+    return resolveClientIp(
+      {
+        socketAddress: req.socket.remoteAddress ?? 'unknown',
+        forwardedFor:
+          typeof forwardedFor === 'string'
+            ? forwardedFor
+            : Array.isArray(forwardedFor)
+              ? forwardedFor
+              : undefined,
+      },
+      config.trustProxy === true,
+    );
   }
 
   function str(body: JsonBody, key: string): string {
@@ -390,7 +413,13 @@ export function createVerificationServer(
     }
     const session = sessionService.get(token);
     if (!session) {
-      res.setHeader('Set-Cookie', SessionService.clearCookieHeader(config.account?.sessionSecure ?? true));
+      res.setHeader(
+        'Set-Cookie',
+        SessionService.clearCookieHeader(
+          config.account?.sessionSecure ?? true,
+          config.account?.sessionSameSite,
+        ),
+      );
       sendJson(res, 401, { ok: false, reason: 'session-expired', message: 'Session expired. Please log in again.' });
       return null;
     }
@@ -1121,7 +1150,13 @@ export function createVerificationServer(
   ): void {
     const token = parseSessionCookie(req);
     if (token) sessionService.destroy(token);
-    res.setHeader('Set-Cookie', SessionService.clearCookieHeader(config.account?.sessionSecure ?? true));
+    res.setHeader(
+      'Set-Cookie',
+      SessionService.clearCookieHeader(
+        config.account?.sessionSecure ?? true,
+        config.account?.sessionSameSite,
+      ),
+    );
     sendJson(res, 200, { ok: true });
   }
 

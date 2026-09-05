@@ -11,6 +11,14 @@
 export interface ServerConfig {
   readonly port: number;
   readonly allowedOrigins: readonly string[];
+  /**
+   * When true, the client IP used by rate limiters is taken from the
+   * RIGHTMOST `X-Forwarded-For` entry (the value appended by a single trusted
+   * reverse-proxy edge such as Railway/Render/Fly/Vercel). Client-supplied
+   * leading entries are never trusted. When false/unset (local development)
+   * the socket peer address is used and `X-Forwarded-For` is ignored.
+   */
+  readonly trustProxy?: boolean;
   readonly email: {
     readonly configured: boolean;
     readonly host: string;
@@ -89,6 +97,15 @@ export interface ServerConfig {
     readonly sessionTtlMs: number;
     /** Whether to set the Secure flag on session cookies (default true). */
     readonly sessionSecure: boolean;
+    /**
+     * Session cookie SameSite policy (Lax | Strict | None).
+     *
+     * Default Lax keeps the local-development behavior. Production serves the
+     * app from a Vercel origin and the API from a Railway origin — that is a
+     * CROSS-SITE request, so the cookie must be SameSite=None (+ Secure, which
+     * is forced on) for it to be stored and sent by the browser.
+     */
+    readonly sessionSameSite?: 'Lax' | 'Strict' | 'None';
   };
 }
 
@@ -97,6 +114,27 @@ function intEnv(name: string, fallback: number): number {
   if (!raw || !raw.trim()) return fallback;
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/**
+ * Server port resolution.
+ *
+ * 1. VERIFY_SERVER_PORT   — explicit override (local development, docs).
+ * 2. PORT                 — injected by platforms (Railway/Render/Fly/Vercel).
+ * 3. 8787                 — local default.
+ */
+function readPort(env: NodeJS.ProcessEnv): number {
+  const raw = (env.VERIFY_SERVER_PORT || env.PORT || '').trim();
+  if (!raw) return 8787;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 8787;
+}
+
+/** Coerce ACCOUNT_SESSION_SAMESITE; anything outside Lax|Strict|None → Lax. */
+function readSessionSameSite(env: NodeJS.ProcessEnv): 'Lax' | 'Strict' | 'None' {
+  const v = env.ACCOUNT_SESSION_SAMESITE?.trim();
+  if (v === 'Strict' || v === 'None') return v;
+  return 'Lax';
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
@@ -111,10 +149,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const smtpPass = env.SMTP_PASS ?? '';
 
   const otpHashSecret = env.OTP_HASH_SECRET ?? '';
+  const sessionSameSite = readSessionSameSite(env);
 
   return {
-    port: intEnv('VERIFY_SERVER_PORT', 8787),
+    port: readPort(env),
     allowedOrigins,
+    // A single trusted reverse-proxy edge enabled explicitly (never default).
+    trustProxy: env.VERIFY_SERVER_TRUST_PROXY?.trim() === 'true',
     email: {
       // Real delivery requires host + credentials + an explicit From.
       configured: Boolean(smtpHost && smtpUser && smtpPass && env.EMAIL_FROM),
@@ -184,7 +225,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
         stateTtlMs: intEnv('GOOGLE_STATE_TTL_MINUTES', 10) * 60 * 1000,
       },
       sessionTtlMs: intEnv('ACCOUNT_SESSION_TTL_HOURS', 24) * 60 * 60 * 1000,
-      sessionSecure: env.ACCOUNT_SESSION_SECURE !== 'false',
+      // SameSite=None cookies are only honored over HTTPS — force Secure on.
+      sessionSecure:
+        sessionSameSite === 'None' ? true : env.ACCOUNT_SESSION_SECURE !== 'false',
+      sessionSameSite,
     },
     aadhaarKyc: {
       providerName: env.AADHAAR_KYC_PROVIDER?.trim() ?? '',
