@@ -17,6 +17,7 @@ import Database from 'better-sqlite3';
 import type { ServerConfig } from '../server/config';
 import { listenVerificationServer } from '../server/index';
 import { applySchema } from '../server/account/db';
+import { enrollmentVectors, sameFaceVector, differentFaceVector } from './biometric-vectors';
 
 const ENC = 'srv-level3-enc-secret';
 const HASH = 'srv-test-otp-hash-secret-0123456789';
@@ -40,6 +41,7 @@ function makeServerConfig(): ServerConfig {
     registry: { officerToken: '' },
     account: {
       encryptionSecret: ENC,
+      biometricEncryptionSecret: ENC,
       dbPath: '',
       smsConfigured: true,
       whatsappConfigured: true,
@@ -106,6 +108,25 @@ function cookieValue(setCookie: string | null | undefined): string | null {
   return m ? m[1] : null;
 }
 
+/**
+ * Part 8: real server-side biometric enrollment over HTTP (single-use token +
+ * real embeddings). Replaces the removed bare `identity-verified` trust path.
+ */
+async function fullyEnrollOverHttp(base: string, sid: string): Promise<void> {
+  const begin = await resp(base, '/api/v1/account/biometric/enrollment/begin', {}, `priestate_sid=${sid}`);
+  assert.equal(begin.status, 200);
+  const token = begin.body.token as string;
+  const done = await resp(
+    base,
+    '/api/v1/account/biometric/enrollment/complete',
+    { token, consent: true, embeddings: enrollmentVectors(4) },
+    `priestate_sid=${sid}`,
+  );
+  assert.equal(done.status, 200, 'enrollment should complete over HTTP');
+  assert.equal(done.body.enrollmentState, 'enrolled');
+  assert.equal(done.body.identityVerified, true);
+}
+
 test('OTP-send requires a session: 401 without cookie', async (t) => {
   const env = makeOverrides();
   const stack = await listenVerificationServer(makeServerConfig(), env.overrides);
@@ -148,7 +169,7 @@ test('Login sets HttpOnly session cookie that later authenticates; logout revoke
   assert.equal((await resp(base, '/api/v1/account/otp-whatsapp/verify', { code: waCode }, `priestate_sid=${sid}`)).status, 200);
 
   assert.equal((await resp(base, '/api/v1/account/google/complete', { authCode: 'abc' }, `priestate_sid=${sid}`)).status, 200);
-  assert.equal((await resp(base, '/api/v1/account/identity-verified', { confirmed: true }, `priestate_sid=${sid}`)).status, 200);
+  await fullyEnrollOverHttp(base, sid);
 
   // Now login with password.
   const login = await resp(base, '/api/v1/account/login', { walletAddress: WALLET, password: 'Str0ng#Pass' });
@@ -206,7 +227,7 @@ test('Login endpoint is rate limited (429 after 5 attempts)', async (t) => {
   const waCode = env.capture.whatsapp[env.capture.whatsapp.length - 1].code;
   assert.equal((await resp(base, '/api/v1/account/otp-whatsapp/verify', { code: waCode }, `priestate_sid=${sid}`)).status, 200);
   assert.equal((await resp(base, '/api/v1/account/google/complete', { authCode: 'x' }, `priestate_sid=${sid}`)).status, 200);
-  assert.equal((await resp(base, '/api/v1/account/identity-verified', { confirmed: true }, `priestate_sid=${sid}`)).status, 200);
+  await fullyEnrollOverHttp(base, sid);
 
   // 5 login attempts, all with wrong password → 401. 6th is rate limited.
   const statuses = [];
@@ -217,13 +238,87 @@ test('Login endpoint is rate limited (429 after 5 attempts)', async (t) => {
   assert.deepEqual(statuses, [200, 401, 401, 401, 401, 429]);
 });
 
-test('Unauthenticated identity-verified and google-complete return 401', async (t) => {
+test('Unauthenticated biometric-enrollment-begin and google-complete return 401', async (t) => {
   const env = makeOverrides();
   const stack = await listenVerificationServer(makeServerConfig(), env.overrides);
   const base = `http://127.0.0.1:${stack.port}`;
   t.after(async () => { await stack.close(); rmSync(env.dir, { recursive: true, force: true }); });
 
-  assert.equal((await resp(base, '/api/v1/account/identity-verified', { confirmed: true })).status, 401);
+  assert.equal((await resp(base, '/api/v1/account/biometric/enrollment/begin', {})).status, 401);
   assert.equal((await resp(base, '/api/v1/account/google/complete', { authCode: 'x' })).status, 401);
   assert.equal((await resp(base, '/api/v1/account/otp-whatsapp/verify', { code: '123456' })).status, 401);
+});
+
+/**
+ * Part 8 — end-to-end server-authoritative LOGIN FACE MATCHING over HTTP.
+ * The reference is enrolled server-side; a live embedding is matched against
+ * the stored reference; the server returns the verdict and IGNORES any
+ * client-supplied `matched`/`score` claims.
+ */
+test('Part 8: server-authoritative login face match over HTTP', async (t) => {
+  const env = makeOverrides();
+  const stack = await listenVerificationServer(makeServerConfig(), env.overrides);
+  const base = `http://127.0.0.1:${stack.port}`;
+  t.after(async () => { await stack.close(); rmSync(env.dir, { recursive: true, force: true }); });
+
+  // Fully register + enroll.
+  const reg = await resp(base, '/api/v1/account/register', payload());
+  assert.equal(reg.status, 201);
+  let sid = cookieValue(reg.setCookie)!;
+  const sendSms = await resp(base, '/api/v1/account/otp-sms/send', {}, `priestate_sid=${sid}`);
+  assert.equal(sendSms.status, 200);
+  const smsCode = env.capture.sms[env.capture.sms.length - 1].code;
+  assert.equal((await resp(base, '/api/v1/account/otp-sms/verify', { code: smsCode }, `priestate_sid=${sid}`)).status, 200);
+  const sendWa = await resp(base, '/api/v1/account/otp-whatsapp/send', {}, `priestate_sid=${sid}`);
+  assert.equal(sendWa.status, 200);
+  const waCode = env.capture.whatsapp[env.capture.whatsapp.length - 1].code;
+  assert.equal((await resp(base, '/api/v1/account/otp-whatsapp/verify', { code: waCode }, `priestate_sid=${sid}`)).status, 200);
+  assert.equal((await resp(base, '/api/v1/account/google/complete', { authCode: 'x' }, `priestate_sid=${sid}`)).status, 200);
+  await fullyEnrollOverHttp(base, sid);
+
+  // Begin a verification session — no session cookie required (public-purpose
+  // route), body carries the wallet; the returned token is bound to the wallet
+  // + current reference version.
+  const vb = await resp(base, '/api/v1/account/biometric/verification/begin', { walletAddress: WALLET });
+  assert.equal(vb.status, 200);
+  const token = vb.body.token as string;
+  const refVersion = vb.body.referenceVersion as number;
+  assert.equal(typeof token, 'string');
+  assert.ok(token.length > 0);
+  assert.equal(typeof refVersion, 'number');
+
+  // Same-face live embedding → server returns matched. Attach a bogus client
+  // claim (matched:false, score:0) to prove the server IGNORES it.
+  const okRes = await resp(base, '/api/v1/account/biometric/verification/complete', {
+    verificationToken: token,
+    liveEmbedding: sameFaceVector,
+    matched: false,
+    score: 0,
+  }, `priestate_sid=${sid}`);
+  assert.equal(okRes.status, 200);
+  assert.equal(okRes.body.ok, true);
+  assert.equal(okRes.body.verdict, 'matched');
+
+  // Different-face live embedding → mismatch (server done).
+  const vb2 = await resp(base, '/api/v1/account/biometric/verification/begin', { walletAddress: WALLET });
+  assert.equal(vb2.status, 200);
+  const mm = await resp(base, '/api/v1/account/biometric/verification/complete', {
+    verificationToken: vb2.body.token as string,
+    liveEmbedding: differentFaceVector,
+    matched: true,
+    score: 1,
+  }, `priestate_sid=${sid}`);
+  assert.equal(mm.status, 200);
+  // A mismatch still resolves a verdict (ok:true, verdict:'mismatch').
+  assert.equal(mm.body.ok, true);
+  assert.equal(mm.body.verdict, 'mismatch');
+
+  // Replay of a consumed token is rejected (fail-closed), even with the same face.
+  const replay = await resp(base, '/api/v1/account/biometric/verification/complete', {
+    verificationToken: token,
+    liveEmbedding: sameFaceVector,
+  }, `priestate_sid=${sid}`);
+  assert.equal(replay.status, 200);
+  assert.equal(replay.body.ok, false);
+  assert.notEqual(replay.body.verdict, 'matched');
 });

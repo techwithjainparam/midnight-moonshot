@@ -53,6 +53,12 @@ export interface PublicAccountView {
   readonly googleLinked: boolean;
   readonly identityVerified: boolean;
   readonly createdAt: number;
+  /**
+   * Enrollment lifecycle state ('not_enrolled' | 'enrolled' | 'revoked' |
+   * 'unavailable'), derived server-side from the stored reference metadata —
+   * never self-asserted by the browser.
+   */
+  readonly enrollmentState: 'not_enrolled' | 'enrolled' | 'revoked' | 'unavailable';
 }
 
 /**
@@ -89,6 +95,20 @@ export interface AccountRecord {
   readonly googleLinked: boolean;
   readonly identityVerified: boolean;
   readonly createdAt: number;
+  /**
+   * Encrypted biometric reference (AES-256-GCM, SEPARATE key derived from
+   * ACCOUNT_BIOMETRIC_ENC_SECRET). Null until the account has been enrolled.
+   * Never holds a raw face image — only the protected reference embedding.
+   */
+  readonly biometricReferenceCipherText: string | null;
+  /** Monotonic version of the enrolled reference (for key rotation/replace). */
+  readonly biometricReferenceVersion: number | null;
+  /** Unix ms when the current reference was enrolled. */
+  readonly biometricEnrolledAt: number | null;
+  /** Unix ms when the enrollee gave biometric consent. */
+  readonly biometricConsentAt: number | null;
+  /** Unix ms when the reference was revoked; null = not revoked. */
+  readonly biometricRevokedAt: number | null;
 }
 
 /** What the registration endpoint accepts from the browser. */
@@ -257,7 +277,119 @@ export function toPublicAccountView(record: AccountRecord): PublicAccountView {
     googleLinked: record.googleLinked,
     identityVerified: record.identityVerified,
     createdAt: record.createdAt,
+    enrollmentState: recordIdentityEnrollmentState(record),
   };
+}
+
+/**
+ * Derive the enrollment lifecycle state for the public view.
+ *   * no encrypted reference → 'not_enrolled'
+ *   * reference present but revoked → 'revoked'
+ *   * reference present and live → 'enrolled'
+ * When the biometric feature is unconfigured there is no stored reference, so
+ * this is 'not_enrolled' (the UI surfaces "unavailable" separately via the
+ * capabilities snapshot when the biometric key is missing).
+ */
+export function recordIdentityEnrollmentState(record: AccountRecord): PublicAccountView['enrollmentState'] {
+  if (!record.biometricReferenceCipherText) return 'not_enrolled';
+  if (record.biometricRevokedAt !== null) return 'revoked';
+  return 'enrolled';
+}
+
+/**
+ * ── Registration identity evidence (Level 3 Part 7) ──────────────────────
+ *
+ * The combined registration session (real landmark liveness + live browser
+ * location) MUST NOT be representable as a bare boolean the server trusts.
+ * This is the honest server boundary:
+ *   * the server accepts an EVIDENCE DESCRIPTOR, not a self-asserted flag,
+ *   * it validates structure, coordinate ranges, accuracy and freshness,
+ *   * it never stores raw coordinates, landmarks, or any biometric value,
+ *   * a missing / malformed / stale / coarse descriptor is REJECTED
+ *     (`identity_evidence_rejected`), so a client cannot "prove" identity by
+ *     sending `{ livenessPassed: true, locationVerified: true }`.
+ *
+ * Anti-spoof honesty: browser geolocation and on-device landmark AI are NOT
+ * cryptographic physical-presence attestation. The server records that a
+ * genuine combined session reported evidence; it does not and cannot claim
+ * cryptographic proof of physical presence.
+ */
+
+/** Max acceptable age of the location fix, ms. */
+export const EVIDENCE_MAX_LOCATION_AGE_MS = 30_000;
+/** Max acceptable position accuracy, m. */
+export const EVIDENCE_MAX_ACCURACY_M = 100;
+/** Coordinate range guards (valid lat/lon). */
+export const EVIDENCE_MAX_ABS_LAT = 90;
+export const EVIDENCE_MAX_ABS_LON = 180;
+
+/** Where the evidence originally landed — used by honest UB mapping. */
+export type IdentityEvidenceContext = 'registration' | 'login';
+
+/** Decoded location evidence descriptor submitted by the client. */
+export interface LocationEvidenceDescriptor {
+  readonly latitude: number | null;
+  readonly longitude: number | null;
+  readonly accuracyMeters: number | null;
+  readonly timestampMs: number;
+  readonly nonce: string;
+}
+
+/** Everything the combined registration session sends to complete. */
+export interface IdentityEvidence {
+  readonly context: IdentityEvidenceContext;
+  /** Real landmark liveness completed (opaque, client-side observed). */
+  readonly livenessPassed: boolean;
+  /** Live, validated browser location fix family. */
+  readonly location: LocationEvidenceDescriptor;
+}
+
+/** Result of the server's evidence refusal gate. */
+export type IdentityEvidenceDenial =
+  | 'missing'
+  | 'liveness_not_passed'
+  | 'location_missing'
+  | 'location_invalid'
+  | 'location_stale'
+  | 'location_accuracy_insufficient'
+  | 'location_denied_unavailable';
+
+/**
+ * Validate an identity-evidence descriptor. Pure and deterministic — the whole
+ * point is the server decides, not the browser. Any ambiguity / missing field
+ * FAILS CLOSED.
+ */
+export function rejectIdentityEvidence(
+  evidence: IdentityEvidence | null | undefined,
+  nowMs: number,
+): IdentityEvidenceDenial | null {
+  if (!evidence) return 'missing';
+  if (evidence.livenessPassed !== true) return 'liveness_not_passed';
+  const loc = evidence.location;
+  if (!loc) return 'location_missing';
+
+  // No valid coords at all → denied / unavailable.
+  if (loc.latitude === null || loc.longitude === null || loc.accuracyMeters === null) {
+    return 'location_denied_unavailable';
+  }
+  // Range + finiteness.
+  if (
+    !Number.isFinite(loc.latitude) ||
+    !Number.isFinite(loc.longitude) ||
+    !Number.isFinite(loc.accuracyMeters) ||
+    Math.abs(loc.latitude) > EVIDENCE_MAX_ABS_LAT ||
+    Math.abs(loc.longitude) > EVIDENCE_MAX_ABS_LON
+  ) {
+    return 'location_invalid';
+  }
+  // Freshness.
+  const age = nowMs - loc.timestampMs;
+  if (age < 0 || age > EVIDENCE_MAX_LOCATION_AGE_MS) return 'location_stale';
+  // Accuracy.
+  if (loc.accuracyMeters <= 0 || loc.accuracyMeters > EVIDENCE_MAX_ACCURACY_M) {
+    return 'location_accuracy_insufficient';
+  }
+  return null; // accepted (structure + freshness + range all hold)
 }
 
 function deriveAccountStatus(record: AccountRecord): PublicAccountView['status'] {

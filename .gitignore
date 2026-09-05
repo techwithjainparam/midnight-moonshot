@@ -8,6 +8,9 @@ dist-ssr/
 # Generated contract artifacts (regenerated with `npm run compile`)
 contracts/managed/
 
+# Generated face-model weights (regenerated with `npm run copy-face-models`)
+public/models/
+
 # Local runtime state and secrets
 .midnight-state.json
 .midnight-state.json.backup

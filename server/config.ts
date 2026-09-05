@@ -54,6 +54,11 @@ export interface ServerConfig {
      * closed; PII is never persisted plainly).
      */
     readonly encryptionSecret: string;
+    /**
+     * SEPARATE secret deriving the biometric-reference at-rest AES key. When
+     * absent the biometric feature fails closed (never enrolls/stores).
+     */
+    readonly biometricEncryptionSecret: string;
     /** Absolute or CWD-relative path to the SQLite database file. */
     readonly dbPath: string;
     /** True when a real SMS gateway is configured (else SMS OTP is unavailable). */
@@ -112,6 +117,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     },
     account: {
       encryptionSecret: env.ACCOUNT_ENC_SECRET?.trim() ?? '',
+      biometricEncryptionSecret: env.ACCOUNT_BIOMETRIC_ENC_SECRET?.trim() ?? '',
       dbPath: env.ACCOUNT_DB_PATH?.trim() ?? '',
       smsConfigured: env.SMS_GATEWAY_PROVIDER?.trim() !== '',
       whatsappConfigured: env.WHATSAPP_GATEWAY_API_TOKEN?.trim() !== '',

@@ -64,6 +64,8 @@ import type { AccountStore } from './account/store';
 import { openDatabase } from './account/db';
 import { SqliteAccountStore } from './account/sqlite-store';
 import { SessionService } from './account/session';
+import type { IdentityEvidence } from './account/model';
+import type { FaceEmbedding } from './account/biometric';
 
 export interface VerificationServerOverrides {
   /** Test seam: replace SMTP delivery with a capture transport. */
@@ -78,6 +80,8 @@ export interface VerificationServerOverrides {
   readonly accountStore?: AccountStore;
   /** Test seam: account PII encryption secret (fail closed without it). */
   readonly accountEncryptionSecret?: string;
+  /** Test seam: SEPARATE biometric-reference encryption secret (fail closed without it). */
+  readonly accountBiometricEncryptionSecret?: string;
   /** Test seam: SMS OTP delivery transport (capture real codes in tests). */
   readonly accountSmsDelivery?: { configured: boolean; send: (to: string, code: string) => void };
   /** Test seam: WhatsApp OTP delivery transport. */
@@ -162,6 +166,8 @@ export function createVerificationServer(
   const accountService = new AccountService({
     store: persistentAccountStore,
     encryptionSecret: overrides.accountEncryptionSecret ?? config.account?.encryptionSecret ?? '',
+    biometricEncryptionSecret:
+      overrides.accountBiometricEncryptionSecret ?? config.account?.biometricEncryptionSecret ?? '',
     otp: { hashSecret: config.otp.hashSecret || DEV_FALLBACK_OTP_SECRET },
     smsDelivery:
       overrides.accountSmsDelivery ??
@@ -192,7 +198,11 @@ export function createVerificationServer(
 
   // ── HTTP plumbing ──────────────────────────────────────────────────
 
-  const MAX_BODY_BYTES = 8 * 1024;
+  // A generous per-request JSON body limit. Larger than historical 8 KB
+  // because the biometric enrollment payload carries ~512 real face-embedding
+  // floats (~9–10 KB). The strict security invariants (no PII on chain, etc.)
+  // are unaffected; requests still fail closed when oversized.
+  const MAX_BODY_BYTES = 128 * 1024;
 
   interface JsonBody {
     [key: string]: unknown;
@@ -428,8 +438,18 @@ export function createVerificationServer(
         return void routeAccountLoginState(res, body);
       case '/api/v1/account/login/face-verification':
         return void routeAccountFaceVerification(res, body);
-      case '/api/v1/account/identity-verified':
-        return void (await routeAccountIdentity(req, res, body));
+      case '/api/v1/account/identity-evidence':
+        return void (await routeIdentityEvidence(req, res, body));
+      case '/api/v1/account/biometric/enrollment/begin':
+        return void (await routeBiometricEnrollmentBegin(req, res));
+      case '/api/v1/account/biometric/enrollment/complete':
+        return void (await routeBiometricEnrollmentComplete(req, res, body));
+      case '/api/v1/account/biometric/revoke':
+        return void (await routeBiometricRevoke(req, res));
+      case '/api/v1/account/biometric/verification/begin':
+        return void (await routeBiometricVerificationBegin(res, body));
+      case '/api/v1/account/biometric/verification/complete':
+        return void (await routeBiometricVerificationComplete(req, res, body));
       case '/api/v1/account/login':
         return void (await routeAccountLogin(req, res, body));
       default:
@@ -477,6 +497,28 @@ export function createVerificationServer(
         return;
       case 'replay':
         sendJson(res, 400, { ok: false, reason: 'replay', message: 'Google sign-in state was already used.' });
+        return;
+      case 'identity-evidence-rejected':
+        sendJson(res, 422, {
+          ok: false,
+          reason: 'identity-evidence-rejected',
+          message: 'Registration identity evidence was incomplete, stale, or invalid. A bare "verified" flag is never accepted.',
+        });
+        return;
+      case 'no-consent':
+        sendJson(res, 400, { ok: false, reason: 'no-consent', message: 'Biometric consent was not recorded.' });
+        return;
+      case 'session-invalid':
+        sendJson(res, 401, { ok: false, reason: 'session-invalid', message: 'That one-time code/credential was missing, reused, expired, or bound to a different wallet.' });
+        return;
+      case 'low-quality':
+        sendJson(res, 422, { ok: false, reason: 'low-quality', message: 'The captured embeddings were insufficient to derive a usable reference.' });
+        return;
+      case 'no-reference':
+        sendJson(res, 409, { ok: false, reason: 'no-reference', message: 'No enrolled biometric reference exists for login verification.' });
+        return;
+      case 'revoked':
+        sendJson(res, 409, { ok: false, reason: 'revoked', message: 'The biometric reference for this account has been revoked.' });
         return;
       default:
         sendJson(res, 500, { ok: false, reason: 'internal' });
@@ -739,21 +781,160 @@ export function createVerificationServer(
     sendJson(res, 200, { ok: true, faceVerification });
   }
 
-  async function routeAccountIdentity(
+  /**
+   * POST /api/v1/account/biometric/enrollment/begin
+   *
+   * ⚠️ SECURITY FIX (Part 8): the old `/api/v1/account/identity-verified` route
+   * accepted a bare `confirmed:true` from the browser and set `identityVerified`
+   * with NO server-computed evidence. That self-assertion path is REMOVED.
+   *
+   * This is the only way to begin identity-verification setup now: it issues a
+   * single-use, short-TTL, wallet-bound ENROLLMENT token. The server never sets
+   * `identityVerified` here.
+   */
+  function routeBiometricEnrollmentBegin(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): void {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const result = accountService.beginBiometricEnrollment(auth.walletAddress);
+    if (!result.ok) return sendAccountError(res, result.reason);
+    sendJson(res, 200, result);
+  }
+
+  /**
+   * POST /api/v1/account/biometric/enrollment/complete
+   *
+   * The server consumes the enrollment token, derives + encrypts the reference,
+   * and — as the ONLY path — sets `identityVerified=true`. It never trusts a
+   * client `matched`/`score`/`isHuman`/`confirmed`.
+   */
+  function routeBiometricEnrollmentComplete(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): void {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const token = str(body, 'token');
+    const consent = body?.consent === true;
+    const embeddings = body?.embeddings;
+    if (!Array.isArray(embeddings)) return sendAccountError(res, 'invalid-input');
+    let result: ReturnType<AccountService['enrollBiometricReference']>;
+    try {
+      result = accountService.enrollBiometricReference(auth.walletAddress, {
+        token,
+        embeddings: embeddings as readonly FaceEmbedding[],
+        consent,
+      });
+    } catch (e) {
+      console.error('ENROLL_ROUTE_ERR', (e as Error)?.stack ?? String(e));
+      throw e;
+    }
+    if (!result.ok) return sendAccountError(res, result.reason);
+    sendJson(res, 200, result);
+  }
+
+  /**
+   * POST /api/v1/account/biometric/revoke
+   *
+   * Revoke (and revert identityVerified) so the account must re-enroll.
+   */
+  function routeBiometricRevoke(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): void {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const result = accountService.revokeBiometricReference(auth.walletAddress);
+    if (!result.ok) return sendAccountError(res, result.reason);
+    sendJson(res, 200, result);
+  }
+
+  /**
+   * POST /api/v1/account/biometric/verification/begin
+   *
+   * Issue a single-use, wallet- AND reference-version-bound verification token
+   * used for server-authoritative login face matching.
+   */
+  function routeBiometricVerificationBegin(
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): void {
+    const walletAddress = str(body, 'walletAddress');
+    if (!/^0x[a-fA-F0-9]{64}$/.test(walletAddress)) {
+      sendJson(res, 400, { ok: false, reason: 'invalid-input' });
+      return;
+    }
+    const result = accountService.beginBiometricVerification(walletAddress);
+    if (!result.ok) {
+      sendAccountError(res, result.reason);
+      return;
+    }
+    sendJson(res, 200, result);
+  }
+
+  /**
+   * POST /api/v1/account/biometric/verification/complete
+   *
+   * Server-authoritative login face match: decrypts the stored reference and
+   * compares the live embedding to derive the verdict. Any client-supplied
+   * `matched`/`score` is ignored — only `{ ok, verdict, score }` is returned.
+   */
+  function routeBiometricVerificationComplete(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): void {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const token = str(body, 'verificationToken');
+    const welcomeEmbedding = body?.liveEmbedding;
+    if (!Array.isArray(welcomeEmbedding) || welcomeEmbedding.length === 0) {
+      sendJson(res, 400, { ok: false, verdict: 'invalid_input' });
+      return;
+    }
+    const result = accountService.verifyBiometricMatch(auth.walletAddress, {
+      verificationToken: token,
+      liveEmbedding: welcomeEmbedding as readonly number[],
+    });
+    sendJson(res, 200, result);
+  }
+
+  /**
+   * POST /api/v1/account/identity-evidence
+   *
+   * Additive, server-authoritative boundary for the COMBINED registration
+   * identity check (real landmark liveness + live browser location). The server
+   * does NOT trust a bare `livenessPassed`/`locationVerified` boolean: it runs
+   * the submitted evidence through the pure validator and rejects anything
+   * incomplete, stale, coarsely-located, or coordinate-invalid. It never
+   * stores or echoes raw coordinates, landmarks, or any biometric value.
+   */
+  async function routeIdentityEvidence(
     req: http.IncomingMessage,
     res: http.ServerResponse,
     body: JsonBody,
   ): Promise<void> {
     const auth = requireAuth(req, res);
     if (!auth) return;
-    const confirmed = body.confirmed === true;
-    const result = accountService.markIdentityVerified(auth.walletAddress, confirmed);
+    const result = accountService.recordIdentityEvidence(
+      auth.walletAddress,
+      body?.identityEvidence as IdentityEvidence | null | undefined,
+    );
     if (!result.ok) {
       sendAccountError(res, result.reason);
       return;
     }
-    if (!('view' in result)) return sendAccountError(res, 'internal');
-    sendJson(res, 200, { ok: true, account: result.view });
+    sendJson(res, 200, {
+      ok: true,
+      accepted: result.accepted,
+      receivedAtMs: result.receivedAtMs,
+      message: result.accepted
+        ? 'Registration identity evidence accepted (validated server-side).'
+        : 'Registration identity evidence refused on the server: a bare "verified" flag is never accepted.',
+    });
   }
 
   async function routeAccountLogin(

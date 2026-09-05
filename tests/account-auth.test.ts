@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 
 import { AccountService } from '../server/account/service';
 import { InMemoryAccountStore } from '../server/account/store';
+import { enrollmentVectors } from './biometric-vectors';
 
 const ENC = 'level3-auth-test-enc-secret';
 
@@ -30,6 +31,7 @@ function makeService(over: {
   const service = new AccountService({
     store: new InMemoryAccountStore(),
     encryptionSecret: ENC,
+    biometricEncryptionSecret: ENC,
     otp: { hashSecret: 'auth-test-otp-secret' },
     smsDelivery: {
       configured: over.sms ?? true,
@@ -73,7 +75,22 @@ function fullyVerify(service: AccountService, capture: Capture): void {
   const waCode = lastCode(capture.whatsapp);
   assert.equal(service.verifyWhatsappOtp(WALLET, waCode).ok, true);
   assert.equal('view' in service.completeGoogle(WALLET, 'code') && service.completeGoogle(WALLET, 'code').ok, true);
-  assert.equal('view' in service.markIdentityVerified(WALLET, true) && service.markIdentityVerified(WALLET, true).ok, true);
+  fullyEnroll(service);
+}
+
+/** Part 8: real server-side biometric enrollment (single-use token + embeddings). */
+function fullyEnroll(service: AccountService): void {
+  const begin = service.beginBiometricEnrollment(WALLET);
+  assert.equal(begin.ok, true);
+  assert.ok('token' in begin);
+  if (!('token' in begin)) return;
+  const done = service.enrollBiometricReference(WALLET, {
+    token: begin.token,
+    embeddings: enrollmentVectors(4),
+    consent: true,
+  });
+  assert.equal(done.ok, true, 'enrollment should complete');
+  if (done.ok) assert.equal(done.identityVerified, true);
 }
 
 function lastCode(entries: string[]): string {
@@ -104,7 +121,7 @@ test('login is blocked when any single factor is missing', () => {
   assert.equal(issue.ok, true);
   assert.equal(service.verifySmsOtp(WALLET, lastCode(capture.sms)).ok, true);
   assert.equal('view' in service.completeGoogle(WALLET, 'code') && service.completeGoogle(WALLET, 'code').ok, true);
-  assert.equal('view' in service.markIdentityVerified(WALLET, true) && service.markIdentityVerified(WALLET, true).ok, true);
+  fullyEnroll(service);
 
   // Correct password but WhatsApp pending => blocked as a missing factor.
   const blocked = service.login({ walletAddress: WALLET, password: 'V3ry#Secret' });

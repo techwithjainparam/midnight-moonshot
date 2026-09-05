@@ -24,6 +24,11 @@ CREATE TABLE IF NOT EXISTS accounts (
   whatsapp_otp_verified INTEGER NOT NULL DEFAULT 0,
   google_linked         INTEGER NOT NULL DEFAULT 0,
   identity_verified     INTEGER NOT NULL DEFAULT 0,
+  biometric_reference_ciphertext TEXT,
+  biometric_reference_version    INTEGER,
+  biometric_enrolled_at          INTEGER,
+  biometric_consent_at           INTEGER,
+  biometric_revoked_at           INTEGER,
   created_at       INTEGER NOT NULL
 );
 
@@ -40,6 +45,15 @@ CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 `;
 
+/** Additive, idempotent column migrations for pre-existing account DBs. */
+const MIGRATIONS_SQL: readonly string[] = [
+  `ALTER TABLE accounts ADD COLUMN biometric_reference_ciphertext TEXT`,
+  `ALTER TABLE accounts ADD COLUMN biometric_reference_version INTEGER`,
+  `ALTER TABLE accounts ADD COLUMN biometric_enrolled_at INTEGER`,
+  `ALTER TABLE accounts ADD COLUMN biometric_consent_at INTEGER`,
+  `ALTER TABLE accounts ADD COLUMN biometric_revoked_at INTEGER`,
+];
+
 /**
  * Apply the PRIESTATE account/session schema to an existing connection.
  * Exposed for tests and callers that open their own Database handle.
@@ -48,6 +62,14 @@ export function applySchema(db: Database.Database): void {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.exec(SCHEMA_SQL);
+  // Idempotent additive migrations (safe to run on every boot).
+  for (const sql of MIGRATIONS_SQL) {
+    try {
+      db.exec(sql);
+    } catch {
+      // Column already exists — ignore.
+    }
+  }
 }
 
 /**

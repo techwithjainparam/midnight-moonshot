@@ -37,6 +37,11 @@ function makeRecord(over: Partial<AccountRecord> = {}): AccountRecord {
     googleLinked: false,
     identityVerified: false,
     createdAt: 1000,
+    biometricReferenceCipherText: null,
+    biometricReferenceVersion: null,
+    biometricEnrolledAt: null,
+    biometricConsentAt: null,
+    biometricRevokedAt: null,
     ...over,
   };
 }

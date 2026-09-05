@@ -197,6 +197,8 @@ export interface PublicAccountView {
   readonly googleLinked: boolean;
   readonly identityVerified: boolean;
   readonly createdAt: number;
+  /** Enrollment lifecycle state, derived server-side ('not_enrolled'|'enrolled'|'revoked'|'unavailable'). */
+  readonly enrollmentState: 'not_enrolled' | 'enrolled' | 'revoked' | 'unavailable';
 }
 
 // ── Client-side validation (mirrors the server, for instant feedback) ──

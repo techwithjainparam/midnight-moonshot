@@ -17,12 +17,21 @@ import { GreyFrame } from './vision-provider';
 
 export type CameraErrorKind = 'denied' | 'unavailable' | 'unsupported';
 
+/** A raw RGB frame buffer in [0,255] (length = width*height*3). */
+export interface RawFrame {
+  readonly width: number;
+  readonly height: number;
+  readonly rgb: Uint8Array;
+}
+
 export interface CameraHandle {
   readonly video: HTMLVideoElement;
   /** Stop every track and drop the stream. Safe to call multiple times. */
   readonly stop: () => void;
   /** Capture one grid×grid greyscale sample of the current live frame. */
   readonly sample: (grid: number) => GreyFrame;
+  /** Capture a full-res RGB snapshot for the landmark/face provider. */
+  readonly captureRaw: (maxSize?: number) => RawFrame;
 }
 
 export function cameraErrorMessage(kind: CameraErrorKind): string {
@@ -77,12 +86,51 @@ export async function requestCamera(grid = 16): Promise<CameraHandle> {
   void video.play?.();
 
   const sample = makeSampler(video, grid);
+  const captureRaw = makeRawCapturer(video);
   const stop = () => {
     for (const t of tracks) t.stop();
     video.srcObject = null;
   };
 
-  return { video, stop, sample };
+  return { video, stop, sample, captureRaw };
+}
+
+/**
+ * Build a full-resolution RGB capturer. Downscales the live video to at most
+ * `maxSize` px on the long edge to keep inference fast, and returns raw pixels
+ * for the landmark provider. Pixels are used transiently for analysis and
+ * discarded immediately — never stored, logged, or uploaded.
+ */
+function makeRawCapturer(
+  video: HTMLVideoElement,
+  maxSize = 512,
+): (maxSize?: number) => RawFrame {
+  const canvas = document.createElement('canvas');
+  return (overrideMax = maxSize) => {
+    const w = video.videoWidth || 1;
+    const h = video.videoHeight || 1;
+    const scale = Math.min(1, overrideMax / Math.max(w, h));
+    const cw = Math.max(1, Math.round(w * scale));
+    const ch = Math.max(1, Math.round(h * scale));
+    canvas.width = cw;
+    canvas.height = ch;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return { width: cw, height: ch, rgb: new Uint8Array(cw * ch * 3) };
+    ctx.drawImage(video, 0, 0, cw, ch);
+    try {
+      const px = ctx.getImageData(0, 0, cw, ch).data;
+      const rgb = new Uint8Array(cw * ch * 3);
+      for (let i = 0; i < cw * ch; i += 1) {
+        const s = i * 4;
+        rgb[i * 3] = px[s];
+        rgb[i * 3 + 1] = px[s + 1];
+        rgb[i * 3 + 2] = px[s + 2];
+      }
+      return { width: cw, height: ch, rgb };
+    } catch {
+      return { width: cw, height: ch, rgb: new Uint8Array(cw * ch * 3) };
+    }
+  };
 }
 
 function makeSampler(

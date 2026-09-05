@@ -14,6 +14,12 @@ import { readFileSync } from 'node:fs';
 
 import { InMemoryAccountStore } from '../server/account/store';
 import { AccountService } from '../server/account/service';
+import {
+  rejectIdentityEvidence,
+  EVIDENCE_MAX_LOCATION_AGE_MS,
+  EVIDENCE_MAX_ACCURACY_M,
+  type IdentityEvidence,
+} from '../server/account/model';
 import { saveAccount, listAccounts } from '../src/auth/account-store';
 import { createMobileSession, mobileSessionUrl } from '../src/verify/mobile-session';
 
@@ -79,6 +85,7 @@ test('client account-store serialization holds no raw PII or password', () => {
     googleLinked: false,
     identityVerified: false,
     createdAt: 1,
+    enrollmentState: 'not_enrolled',
   });
   const persisted = [...fakeStorage.values()].join('');
   for (const pii of RAW_PII) {
@@ -128,6 +135,137 @@ test('identity layer never emits an on-chain payload (no ledger write surface)',
       assert.ok(
         !text.includes(kw),
         `${rel} must not reference an on-chain surface keyword: "${kw}"`,
+      );
+    }
+  }
+});
+
+// ── Server-authoritative identity-evidence boundary (real liveness + location)
+
+const NOW_EV = Date.now();
+
+function validEvidence(overrides: Partial<IdentityEvidence> = {}): IdentityEvidence {
+  return {
+    context: 'registration',
+    livenessPassed: true,
+    location: {
+      latitude: 12.9716,
+      longitude: 77.5946,
+      accuracyMeters: 20,
+      timestampMs: NOW_EV,
+      nonce: 'pvs-abcd',
+    },
+    ...overrides,
+  };
+}
+
+function evidenceService() {
+  return new AccountService({
+    store: new InMemoryAccountStore(),
+    encryptionSecret: ENC,
+    otp: { hashSecret: 'privacy-otp-secret' },
+    smsDelivery: { configured: true, send: () => undefined },
+    whatsappDelivery: { configured: true, send: () => undefined },
+    googleAuthenticator: { configured: true, complete: () => true },
+  });
+}
+
+test('rejectIdentityEvidence accepts a fresh accurate valid combined report', () => {
+  assert.equal(rejectIdentityEvidence(validEvidence(), NOW_EV), null);
+});
+
+test('rejectIdentityEvidence refuses a bare client boolean (no location)', () => {
+  assert.equal(rejectIdentityEvidence(null, NOW_EV), 'missing');
+  // A bare { confirmed: true }-style payload with no location field.
+  assert.equal(
+    rejectIdentityEvidence({ livenessPassed: true } as never, NOW_EV),
+    'location_missing',
+  );
+});
+
+test('rejectIdentityEvidence refuses a client self-asserted pass without real liveness', () => {
+  assert.equal(
+    rejectIdentityEvidence(validEvidence({ livenessPassed: false }), NOW_EV),
+    'liveness_not_passed',
+  );
+});
+
+test('rejectIdentityEvidence refuses stale / coarse / invalid / missing-location evidence', () => {
+  assert.equal(
+    rejectIdentityEvidence(
+      validEvidence({ location: { ...validEvidence().location, timestampMs: NOW_EV - EVIDENCE_MAX_LOCATION_AGE_MS - 1 } }),
+      NOW_EV,
+    ),
+    'location_stale',
+  );
+  assert.equal(
+    rejectIdentityEvidence(
+      validEvidence({ location: { ...validEvidence().location, accuracyMeters: EVIDENCE_MAX_ACCURACY_M + 1 } }),
+      NOW_EV,
+    ),
+    'location_accuracy_insufficient',
+  );
+  assert.equal(
+    rejectIdentityEvidence(
+      validEvidence({ location: { ...validEvidence().location, latitude: 100 } }),
+      NOW_EV,
+    ),
+    'location_invalid',
+  );
+  assert.equal(
+    rejectIdentityEvidence(
+      validEvidence({ location: { ...validEvidence().location, latitude: null } }),
+      NOW_EV,
+    ),
+    'location_denied_unavailable',
+  );
+});
+
+test('recordIdentityEvidence accepts only validated evidence and stores no raw coords', () => {
+  const service = evidenceService();
+  const addr = '0x' + 'b'.repeat(64);
+  const rr = service.register({ ...validPayload(), walletAddress: addr });
+  assert.equal(rr.ok, true);
+  const ok = service.recordIdentityEvidence(addr, validEvidence());
+  assert.equal(ok.ok, true);
+  if (ok.ok) assert.equal(ok.accepted, true);
+  const store = (service as unknown as { store: InstanceType<typeof InMemoryAccountStore> }).store;
+  const json = JSON.stringify(store.getByWallet(addr));
+  // Raw coordinates, nonce, and accuracy must NEVER be persisted to the record.
+  assert.ok(!json.includes('77.5946'), 'record must not contain longitude');
+  assert.ok(!json.includes('12.9716'), 'record must not contain latitude');
+  assert.ok(!json.includes('pvs-abcd'), 'record must not contain the location nonce');
+});
+
+test('recordIdentityEvidence fails closed on a bare boolean', () => {
+  const service = evidenceService();
+  const addr = '0x' + 'b'.repeat(64);
+  const rr = service.register({ ...validPayload(), walletAddress: addr });
+  assert.equal(rr.ok, true);
+  const r = service.recordIdentityEvidence(addr, null);
+  assert.deepEqual(r, { ok: false, reason: 'identity-evidence-rejected' });
+});
+
+test('Part 7 liveness/location modules never persist raw frames, landmarks, or coords', () => {
+  // The new real-liveness + live-location modules must not reference any
+  // on-ledger, localStorage, URL, or logging surface for their sensitive data.
+  const dir = new URL('../src/liveness/', import.meta.url);
+  const forbidden = [
+    'localStorage',
+    'navigator.clipboard',
+    'window.location.href',
+    'contractAddress',
+    'zkProof',
+    'proof-server',
+    'indexer',
+    'toJSON',
+  ];
+  for (const rel of ['landmark.ts', 'landmark-verifier.ts', 'location.ts', 'location-watcher.ts', 'landmark-provider.ts']) {
+    const text = readFileSync(new URL(rel, dir), 'utf8');
+    for (const kw of forbidden) {
+      assert.ok(
+        !text.includes(kw),
+        `${rel} must not reference sensitive persistence/logging surface: "${kw}"`,
       );
     }
   }

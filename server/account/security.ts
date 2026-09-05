@@ -76,6 +76,28 @@ export function deriveEncryptionKey(rawSecret: string | undefined): EncipherSecr
   return { ok: true, key };
 }
 
+/**
+ * Derive the SEPARATE biometric reference key from ACCOUNT_BIOMETRIC_ENC_SECRET.
+ *
+ * Deliberately a DIFFERENT secret from `ACCOUNT_ENC_SECRET` (which protects
+ * PII), so that a compromise of the PII key does not expose biometric
+ * references and vice-versa (see Real-Identity-Verification plan §E2/G3). It
+ * uses a distinct domain-separation prefix so even an identical raw secret
+ * produces a different key from the PII key — never a shared key.
+ */
+export function deriveBiometricEncryptionKey(
+  rawSecret: string | undefined,
+): EncipherSecret {
+  if (!rawSecret || rawSecret.length < 16) {
+    return {
+      ok: false,
+      reason: 'ACCOUNT_BIOMETRIC_ENC_SECRET missing or shorter than 16 chars',
+    };
+  }
+  const key = createHashSha256(`biometric-ref:v1:${rawSecret}`);
+  return { ok: true, key };
+}
+
 function createHashSha256(value: string): Buffer {
   return createHash('sha256').update(value).digest();
 }
@@ -106,4 +128,30 @@ export function decryptPII(key: Buffer, blob: string): unknown {
   } catch {
     return null;
   }
+}
+
+// ─── Biometric reference at rest (AES-256-GCM, SEPARATE key) ────────
+//
+// The biometric reference is encrypted at rest with a DIFFERENT key from the
+// PII key. We reuse the same GCM primitive but keep the calls separate and
+// explicit so the key passed here is ALWAYS the biometric key (derived from
+// ACCOUNT_BIOMETRIC_ENC_SECRET), never the PII key. This lets biometric
+// material be rotated/re-encrypted independently on key change.
+
+/**
+ * Encrypt a biometric reference (JSON-serializable) at rest. Same wire format
+ * as PII ("iv$tag$ciphertext" hex) but MUST be called with the biometric key.
+ */
+export function encryptBiometricReference(key: Buffer, value: unknown): string {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  const plaintext = Buffer.from(JSON.stringify(value), 'utf8');
+  const enc = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return [iv.toString('hex'), tag.toString('hex'), enc.toString('hex')].join(ENC_SEPARATOR);
+}
+
+/** Decrypt a biometric reference produced by encryptBiometricReference. */
+export function decryptBiometricReference(key: Buffer, blob: string): unknown {
+  return decryptPII(key, blob); // same GCM format; fail closed on any error
 }

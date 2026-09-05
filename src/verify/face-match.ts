@@ -132,6 +132,41 @@ export async function computeReferenceSignature(
   return perceptualGrayGrid(source);
 }
 
+/**
+ * ⚠️ DEMO STAND-IN EMBEDDING — NOT a real face embedding.
+ *
+ * Part 8 moved login/enrollment from "client says matched=true" to real
+ * server-authoritative biometric matching. To exercise that REAL server path
+ * from this clearly-labelled demo, we project the demo perceptual signature
+ * (256-d) down to a normalized 128-d vector that satisfies the server's
+ * embedding-shape/quality gate. In a production deployment this function is
+ * replaced by genuine face-api inference output (server still only ever
+ * receives the embedding + decrypts/compares its own stored reference).
+ *
+ * Deterministic for the same pixels, so a repeated selfie reproduces a close
+ * vector — good enough for a demo, and ONLY ever used behind the "Demo Identity
+ * Verification" banner.
+ */
+export async function projectDemoEmbedding(source: HTMLCanvasElement | ImageData): Promise<number[]> {
+  const sig = perceptualGrayGrid(source);
+  const dim = 128;
+  const out = new Array<number>(dim).fill(0);
+  for (let i = 0; i < dim; i += 1) {
+    // Fold the 256-d signature into 128-d by averaging adjacent pairs, then
+    // remap from [0,255] luma into a small signed range.
+    const lo = sig[i * 2];
+    const hi = sig[i * 2 + 1];
+    out[i] = ((lo + hi) / 2 / 255 - 0.5) * 2;
+  }
+  // Normalize to a unit vector (L2) so the server's cosine gate is well-defined.
+  let norm = 0;
+  for (let i = 0; i < dim; i += 1) norm += out[i] * out[i];
+  norm = Math.sqrt(norm) || 1;
+  const unit = new Array<number>(dim);
+  for (let i = 0; i < dim; i += 1) unit[i] = out[i] / norm;
+  return unit;
+}
+
 function round3(v: number): number {
   return Math.round(v * 1000) / 1000;
 }

@@ -22,6 +22,11 @@ interface Row {
   whatsapp_otp_verified: number;
   google_linked: number;
   identity_verified: number;
+  biometric_reference_ciphertext: string | null;
+  biometric_reference_version: number | null;
+  biometric_enrolled_at: number | null;
+  biometric_consent_at: number | null;
+  biometric_revoked_at: number | null;
   created_at: number;
 }
 
@@ -38,6 +43,11 @@ function rowToRecord(r: Row): AccountRecord {
     whatsappOtpVerified: r.whatsapp_otp_verified === 1,
     googleLinked: r.google_linked === 1,
     identityVerified: r.identity_verified === 1,
+    biometricReferenceCipherText: r.biometric_reference_ciphertext ?? null,
+    biometricReferenceVersion: r.biometric_reference_version ?? null,
+    biometricEnrolledAt: r.biometric_enrolled_at ?? null,
+    biometricConsentAt: r.biometric_consent_at ?? null,
+    biometricRevokedAt: r.biometric_revoked_at ?? null,
     createdAt: r.created_at,
   };
 }
@@ -55,6 +65,11 @@ function recordToRow(r: AccountRecord): Row {
     whatsapp_otp_verified: r.whatsappOtpVerified ? 1 : 0,
     google_linked: r.googleLinked ? 1 : 0,
     identity_verified: r.identityVerified ? 1 : 0,
+    biometric_reference_ciphertext: r.biometricReferenceCipherText ?? null,
+    biometric_reference_version: r.biometricReferenceVersion ?? null,
+    biometric_enrolled_at: r.biometricEnrolledAt ?? null,
+    biometric_consent_at: r.biometricConsentAt ?? null,
+    biometric_revoked_at: r.biometricRevokedAt ?? null,
     created_at: r.createdAt,
   };
 }
@@ -69,12 +84,16 @@ export class SqliteAccountStore implements AccountStore {
         (account_id, wallet_address, password_hash, password_salt,
          pii_ciphertext, masked_mobile, masked_aadhaar,
          sms_otp_verified, whatsapp_otp_verified, google_linked,
-         identity_verified, created_at)
+         identity_verified, biometric_reference_ciphertext,
+         biometric_reference_version, biometric_enrolled_at,
+         biometric_consent_at, biometric_revoked_at, created_at)
       VALUES
         (@account_id, @wallet_address, @password_hash, @password_salt,
          @pii_ciphertext, @masked_mobile, @masked_aadhaar,
          @sms_otp_verified, @whatsapp_otp_verified, @google_linked,
-         @identity_verified, @created_at)
+         @identity_verified, @biometric_reference_ciphertext,
+         @biometric_reference_version, @biometric_enrolled_at,
+         @biometric_consent_at, @biometric_revoked_at, @created_at)
     `);
     this._selectByWallet = this.db.prepare(
       'SELECT * FROM accounts WHERE wallet_address = ?',
@@ -130,6 +149,11 @@ export class SqliteAccountStore implements AccountStore {
       whatsappOtpVerified: 'whatsapp_otp_verified',
       googleLinked: 'google_linked',
       identityVerified: 'identity_verified',
+      biometricReferenceCipherText: 'biometric_reference_ciphertext',
+      biometricReferenceVersion: 'biometric_reference_version',
+      biometricEnrolledAt: 'biometric_enrolled_at',
+      biometricConsentAt: 'biometric_consent_at',
+      biometricRevokedAt: 'biometric_revoked_at',
       createdAt: 'created_at',
     };
 

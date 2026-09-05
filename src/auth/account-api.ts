@@ -153,8 +153,96 @@ export function fetchFaceVerificationState(
   return api('/v1/account/login/face-verification', { walletAddress });
 }
 
-export function markIdentityVerified(walletAddress: string, confirmed: boolean): Promise<AccountApiResult<{ account: PublicAccountView }>> {
-  return api('/v1/account/identity-verified', { walletAddress, confirmed });
+/**
+ * ⚠️ REMOVED (Part 8): the old `markIdentityVerified` accepted a bare
+ * `confirmed:true` and the server set `identityVerified` with NO server-computed
+ * evidence. That trust-everything path was removed. There is NO client function
+ * that sets `identityVerified` from a boolean anymore — it can only be enabled
+ * through real server-side biometric enrollment (see the *Biometric* functions
+ * below). This stub is intentionally ABSENT.
+ */
+
+/**
+ * POST /api/v1/account/biometric/enrollment/begin
+ * Begin server-side biometric reference enrollment for the connected account.
+ * Returns a single-use, short-TTL enrollment token (never the identity flag).
+ */
+export async function beginBiometricEnrollment(): Promise<
+  AccountApiResult<{ token: string; expiresInMs: number }>
+> {
+  return api('/v1/account/biometric/enrollment/begin', {});
+}
+
+/**
+ * POST /api/v1/account/biometric/enrollment/complete
+ * Complete enrollment: the server consumes the single-use token, derives +
+ * encrypts the reference embedding, and — as the ONLY path — sets
+ * `identityVerified=true`. It never trusts a client `matched`/`score`.
+ */
+export type EnrollmentEmbedding = readonly number[];
+export async function completeBiometricEnrollment(
+  input: { token: string; consent: boolean; embeddings: readonly EnrollmentEmbedding[] },
+): Promise<
+  AccountApiResult<{ referenceVersion: number; enrollmentState: 'enrolled'; identityVerified: boolean }>
+> {
+  return api('/v1/account/biometric/enrollment/complete', input);
+}
+
+/**
+ * POST /api/v1/account/biometric/verification/begin
+ * Issue a single-use, wallet- AND reference-version-bound token used for
+ * server-authoritative login face matching.
+ */
+export async function beginBiometricVerification(
+  walletAddress: string,
+): Promise<
+  AccountApiResult<{ token: string; referenceVersion: number; expiresInMs: number }>
+> {
+  return api('/v1/account/biometric/verification/begin', { walletAddress });
+}
+
+/**
+ * POST /api/v1/account/biometric/verification/complete
+ * Server-authoritative login face match: the server decrypts the stored
+ * reference and compares the live embedding to derive the verdict. Any
+ * client-supplied `matched`/`score` is ignored.
+ */
+export interface BiometricVerdictResult {
+  ok: boolean;
+  verdict: 'matched' | 'mismatch' | 'insufficient_quality' | 'no_reference'
+    | 'reference_revoked' | 'session_invalid' | 'provider_unavailable' | 'error';
+  score?: number;
+  referenceVersion?: number;
+}
+export async function completeBiometricVerification(
+  input: { verificationToken: string; liveEmbedding: readonly number[] },
+): Promise<AccountApiResult<BiometricVerdictResult>> {
+  return api('/v1/account/biometric/verification/complete', input);
+}
+
+/**
+ * Submit COMBINED registration identity evidence (real landmark liveness + live
+ * browser location) to the server-authoritative boundary. The server refuses a
+ * bare boolean and validates liveness + freshness/accuracy/range of the
+ * location fix; raw coordinates are never stored or echoed back.
+ */
+export interface IdentityEvidencePayload {
+  readonly context: 'registration' | 'login';
+  readonly livenessPassed: boolean;
+  readonly location: {
+    readonly latitude: number | null;
+    readonly longitude: number | null;
+    readonly accuracyMeters: number | null;
+    readonly timestampMs: number;
+    readonly nonce: string;
+  };
+}
+
+export function submitIdentityEvidence(
+  walletAddress: string,
+  identityEvidence: IdentityEvidencePayload,
+): Promise<AccountApiResult<{ ok: true; accepted: boolean; receivedAtMs: number }>> {
+  return api('/v1/account/identity-evidence', { walletAddress, identityEvidence });
 }
 
 export function loginAccount(

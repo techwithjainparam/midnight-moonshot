@@ -28,6 +28,7 @@ import { deriveLoginState } from '../server/account/login-state';
 import { AccountService } from '../server/account/service';
 import { InMemoryAccountStore } from '../server/account/store';
 import { GOOGLE_STATE_TTL_MS } from '../server/account/google-provider';
+import { enrollmentVectors } from './biometric-vectors';
 
 const ENC = 'login-auth-enc-secret';
 const HASH = 'login-auth-otp-hash-secret-0123456789';
@@ -52,6 +53,7 @@ function makeServerConfig(): ServerConfig {
     registry: { officerToken: '' },
     account: {
       encryptionSecret: ENC,
+      biometricEncryptionSecret: ENC,
       dbPath: '',
       smsConfigured: true,
       whatsappConfigured: true,
@@ -110,6 +112,7 @@ function makeLoginService() {
   const service = new AccountService({
     store: new InMemoryAccountStore(),
     encryptionSecret: ENC,
+    biometricEncryptionSecret: ENC,
     otp: { hashSecret: HASH, smsTtlMs: 5 * 60 * 1000, whatsappTtlMs: 10 * 60 * 1000 },
     smsDelivery: { configured: true, send: (to, code) => { delivered.sms.push({ to, code }); } },
     whatsappDelivery: { configured: true, send: (to, code) => { delivered.whatsapp.push({ to, code }); } },
@@ -160,7 +163,21 @@ async function fullyRegistered(base: string, env: { capture: Capture }, wallet =
   assert.equal((await resp(base, '/api/v1/account/otp-whatsapp/verify', { code: waCode }, `priestate_sid=${sid}`)).status, 200);
 
   assert.equal((await resp(base, '/api/v1/account/google/complete', { authCode: 'abc' }, `priestate_sid=${sid}`)).status, 200);
-  assert.equal((await resp(base, '/api/v1/account/identity-verified', { confirmed: true }, `priestate_sid=${sid}`)).status, 200);
+
+  // Part 8: identity verification is now real server-side biometric enrollment
+  // (single-use token + real embedding), NOT a bare `confirmed:true` flag.
+  const begin = await resp(base, '/api/v1/account/biometric/enrollment/begin', {}, `priestate_sid=${sid}`);
+  assert.equal(begin.status, 200);
+  const token = begin.body.token as string;
+  const complete = await resp(
+    base,
+    '/api/v1/account/biometric/enrollment/complete',
+    { token, consent: true, embeddings: enrollmentVectors(4) },
+    `priestate_sid=${sid}`,
+  );
+  assert.equal(complete.status, 200);
+  assert.equal(complete.body.enrollmentState, 'enrolled');
+  assert.equal(complete.body.identityVerified, true);
   return sid;
 }
 

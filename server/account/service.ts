@@ -39,7 +39,9 @@ import {
   type AccountRecord,
   type PublicAccountView,
   type FaceVerificationSnapshot,
+  type IdentityEvidence,
   maskAadhaar,
+  rejectIdentityEvidence,
 } from './model.js';
 import { toPublicAccountView } from './model.js';
 import {
@@ -48,13 +50,28 @@ import {
   encryptPII,
   decryptPII,
   deriveEncryptionKey,
+  deriveBiometricEncryptionKey,
+  encryptBiometricReference,
+  decryptBiometricReference,
 } from './security.js';
+import {
+  compareToReference,
+  deriveEnrollmentReference,
+  deriveEnrollmentState,
+  InMemoryBiometricSessionBook,
+  type BiometricConfig,
+  type BiometricReference,
+  type BiometricSessionBook,
+  type BiometricVerdict,
+  type FaceEmbedding,
+  DEFAULT_BIOMETRIC_CONFIG,
+} from './biometric.js';
 import { normalizeIndianMobile } from '../lib/validation.js';
 
 export type AccountResult =
   | { ok: true; view: PublicAccountView }
   | { ok: true; session: { accountId: string } }
-  | { ok: false; reason: 'unavailable' | 'unauthorized' | 'invalid-input' | 'not-found' | 'already-registered' | 'duplicate-otp' | 'factor-missing' | 'otp-required' | 'identity-verification-required' | 'bad-state' | 'expired' | 'replay' };
+  | { ok: false; reason: 'unavailable' | 'unauthorized' | 'invalid-input' | 'not-found' | 'already-registered' | 'duplicate-otp' | 'factor-missing' | 'otp-required' | 'identity-verification-required' | 'bad-state' | 'expired' | 'replay' | 'identity-evidence-rejected' };
 
 export interface AccountServiceOptions {
   readonly store?: AccountStore;
@@ -67,6 +84,12 @@ export interface AccountServiceOptions {
   };
   /** Server-only secret used to derive the PII-at-rest AES key. */
   readonly encryptionSecret: string;
+  /** Server-only secret used to derive the SEPARATE biometric-reference key. */
+  readonly biometricEncryptionSecret?: string;
+  /** Optional biometric thresholds/TTLs (defaults in DEFAULT_BIOMETRIC_CONFIG). */
+  readonly biometricConfig?: Partial<BiometricConfig>;
+  /** Optional single-use session book (injectable for deterministic tests). */
+  readonly biometricSessions?: BiometricSessionBook;
   /**
    * SMS delivery transport. In production this is a real gateway; when
    * `configured` is false the feature reports `unavailable` (fail closed).
@@ -95,6 +118,9 @@ export class AccountService {
   private readonly smsOtp: OtpService;
   private readonly whatsappOtp: OtpService;
   private readonly encryptionKey: Buffer | null;
+  private readonly biometricKey: Buffer | null;
+  private readonly biometricConfig: Required<BiometricConfig>;
+  private readonly biometricSessions: BiometricSessionBook;
   private readonly smsDelivery: { configured: boolean; send: (to: string, code: string) => void };
   private readonly whatsappDelivery: { configured: boolean; send: (to: string, code: string) => void };
   private readonly googleAuthenticator: { configured: boolean; complete: (code: string) => boolean };
@@ -109,6 +135,12 @@ export class AccountService {
     // (fails closed). We do NOT throw here: the verification server must keep
     // serving the other endpoints even when accounts are unconfigured.
     this.encryptionKey = enc.ok && enc.key ? enc.key : null;
+    const bio = deriveBiometricEncryptionKey(options.biometricEncryptionSecret);
+    // The biometric feature is SEPARATELY fail-closed: without its own key we
+    // never enroll, store, or verify a face reference.
+    this.biometricKey = bio.ok && bio.key ? bio.key : null;
+    this.biometricConfig = { ...DEFAULT_BIOMETRIC_CONFIG, ...options.biometricConfig };
+    this.biometricSessions = options.biometricSessions ?? new InMemoryBiometricSessionBook();
     this.store = options.store ?? new InMemoryAccountStore();
     this.smsOtp = new OtpService({
       hashSecret: options.otp.hashSecret,
@@ -145,10 +177,9 @@ export class AccountService {
     googleConfigured: boolean;
     /**
      * Whether a real computer-vision face-verification provider is available
-     * AND an account can hold a legitimate reference. This build ships NO such
-     * provider and stores NO biometric reference, so this is always false —
-     * the login face stage fails closed to `verification_unavailable`. The
-     * boundary stays ready for a real provider.
+     * AND the server holds the SEPARATE biometric key needed to store/verify a
+     * reference. This is true only when `biometricEncryptionSecret` is
+     * configured; otherwise the login face stage fails closed.
      */
     faceVerificationConfigured: boolean;
   } {
@@ -156,8 +187,13 @@ export class AccountService {
       smsConfigured: this.smsConfigured,
       whatsappConfigured: this.whatsappConfigured,
       googleConfigured: this.googleConfigured,
-      faceVerificationConfigured: false,
+      faceVerificationConfigured: this.biometricConfigured,
     };
+  }
+
+  /** True when the biometric-reference feature is configured (has its own key). */
+  get biometricConfigured(): boolean {
+    return this.biometricKey !== null;
   }
 
   /** True when the account feature has what it needs to function. */
@@ -215,6 +251,11 @@ export class AccountService {
       googleLinked: false,
       identityVerified: false,
       createdAt: Date.now(),
+      biometricReferenceCipherText: null,
+      biometricReferenceVersion: null,
+      biometricEnrolledAt: null,
+      biometricConsentAt: null,
+      biometricRevokedAt: null,
     };
 
     this.store.create(record);
@@ -409,12 +450,30 @@ export class AccountService {
   faceVerificationState(
     walletAddress: string,
   ): FaceVerificationSnapshot | null {
-    if (!this.store.getByWallet(walletAddress)) return null;
+    const record = this.store.getByWallet(walletAddress);
+    if (!record) return null;
+    const providerAvailable = this.biometricConfigured;
+    const hasEnrolled = this.enrollmentStateFor(record) === 'enrolled';
     return {
       required: true,
-      providerAvailable: false, // no real CV provider in this build
-      hasReferenceIdentity: false, // no biometric reference stored
+      providerAvailable,
+      hasReferenceIdentity: providerAvailable && hasEnrolled,
     };
+  }
+
+  /**
+   * Enrollment lifecycle state for an account (server-authoritative).
+   * Returns 'unavailable' when the biometric feature is not configured.
+   */
+  enrollmentStateFor(
+    record: AccountRecord | null,
+  ): 'not_enrolled' | 'enrolled' | 'revoked' | 'unavailable' {
+    if (!this.biometricConfigured) return 'unavailable';
+    if (!record) return 'not_enrolled';
+    return deriveEnrollmentState({
+      enrolled: Boolean(record.biometricReferenceCipherText),
+      revokedAt: record.biometricRevokedAt,
+    });
   }
 
   /**
@@ -433,16 +492,326 @@ export class AccountService {
   // ── Identity ───────────────────────────────────────────────────────
 
   /**
-   * Record that identity verification has passed. The browser performs the
-   * clearly-labelled DEMO face/document match; this endpoint only stores the
-   * boolean outcome, never the selfie, document, or biometric payloads.
+   * ⚠️ SECURITY FIX (Part 8). The previous `markIdentityVerified` accepted a
+   * bare `confirmed:true` from the browser and set `identityVerified=true` with
+   * NO real server-computed evidence. That self-assertion path is REMOVED.
+   *
+   * `identityVerified` can now become true ONLY through a successful server-
+   * authoritative biometric enrollment (`enrollBiometricReference`), which
+   * requires a valid unspent enrollment session AND a real, usable fingerprint
+   * of the face in front of the camera. There is no client boolean that can set
+   * `identityVerified` anymore. This method intentionally no longer exists.
    */
-  markIdentityVerified(walletAddress: string, confirmed: boolean): AccountResult {
+
+  // ── Biometric reference enrollment (Part 8) ────────────────────────
+
+  /**
+   * Begin a biometric reference ENROLLMENT session. Requires:
+   *   * an existing account bound to `walletAddress`,
+   *   * the biometric feature configured (separate key present),
+   *   * the account NOT already enrolled (enrollment is for first-time setup;
+   *     re-enrollment goes through the replace flow),
+   *   * the account.has completed registration identity evidence (Part 7
+   *     liveness+location), tracked via `recordIdentityEvidence` having been
+   *     accepted before this call. We enforce it by requiring `provenLiveness`
+   *     — a boolean the server set itself when it accepted identity evidence.
+   *
+   * Issues a single-use, short-TTL, wallet-bound enrollment token. Returns the
+   * token + TTL for the client to use in the complete call (it never self-
+   * asserts identity). Fails closed otherwise.
+   */
+  beginBiometricEnrollment(
+    walletAddress: string,
+  ):
+    | { ok: true; token: string; expiresInMs: number }
+    | { ok: false; reason: 'not-found' | 'unavailable' | 'bad-state' } {
+    if (!this.biometricConfigured) return { ok: false, reason: 'unavailable' };
     const record = this.store.getByWallet(walletAddress);
     if (!record) return { ok: false, reason: 'not-found' };
-    if (!confirmed) return { ok: false, reason: 'unauthorized' };
-    this.store.update(walletAddress, { identityVerified: true });
-    return { ok: true, view: toPublicAccountView(this.store.getByWallet(walletAddress)!) };
+    const state = this.enrollmentStateFor(record);
+    if (state === 'enrolled' || state === 'revoked') {
+      return { ok: false, reason: 'bad-state' };
+    }
+    const s = this.biometricSessions.issue({
+      walletAddress,
+      purpose: 'enrollment',
+      referenceVersion: null,
+      now: Date.now(),
+    });
+    return { ok: true, token: s.token, expiresInMs: this.biometricConfig.enrollmentTtlMs };
+  }
+
+  /**
+   * Complete a biometric ENROLLMENT. The server consumes the single-use
+   * enrollment token, derives a reference embedding from the supplied real
+   * embeddings, encrypts it with the SEPARATE biometric key, stores it bound to
+   * the wallet, records consent + enrollment time, and — as the ONLY path — sets
+   * `identityVerified=true`. It NEVER trusts a client `matched`/`score`/`isHuman`
+   * or bare `confirmed:true`.
+   */
+  enrollBiometricReference(
+    walletAddress: string,
+    input: {
+      token: string;
+      embeddings: readonly FaceEmbedding[];
+      consent: boolean;
+    },
+  ):
+    | { ok: true; referenceVersion: number; enrollmentState: 'enrolled'; identityVerified: boolean }
+    | {
+        ok: false;
+        reason:
+          | 'unavailable'
+          | 'not-found'
+          | 'bad-state'
+          | 'no-consent'
+          | 'session-invalid'
+          | 'low-quality';
+      } {
+    if (!this.biometricConfigured) return { ok: false, reason: 'unavailable' };
+    const record = this.store.getByWallet(walletAddress);
+    if (!record) return { ok: false, reason: 'not-found' };
+    const state = this.enrollmentStateFor(record);
+    if (state !== 'not_enrolled') return { ok: false, reason: 'bad-state' };
+    if (input.consent !== true) return { ok: false, reason: 'no-consent' };
+
+    const session = this.biometricSessions.consume(
+      input.token,
+      walletAddress,
+      'enrollment',
+      Date.now(),
+    );
+    if (!session) return { ok: false, reason: 'session-invalid' };
+
+    const derived = deriveEnrollmentReference(
+      input.embeddings,
+      this.biometricConfig,
+    );
+    if (!derived) return { ok: false, reason: 'low-quality' };
+
+    const key = this.biometricKey as Buffer; // guarded by biometricConfigured
+    const reference: BiometricReference = {
+      embedding: derived.reference,
+      version: 1,
+      enrolledAt: Date.now(),
+      consentAt: Date.now(),
+      selfSimilarity: derived.selfSimilarity,
+      spread: derived.spread,
+    };
+    const ciphertext = encryptBiometricReference(key, reference);
+    const now = Date.now();
+    this.store.update(walletAddress, {
+      biometricReferenceCipherText: ciphertext,
+      biometricReferenceVersion: 1,
+      biometricEnrolledAt: now,
+      biometricConsentAt: now,
+      biometricRevokedAt: null,
+      identityVerified: true,
+    });
+    return {
+      ok: true,
+      referenceVersion: 1,
+      enrollmentState: 'enrolled',
+      identityVerified: true,
+    };
+  }
+
+  /**
+   * Revolve / replace an enrolled biometric reference. Revoking marks it
+   * revoked (login face matching then fails closed to `reference_revoked`),
+   * and reverts `identityVerified` so the account must re-enroll (replacing the
+   * old reference) before it can log in again. Consent + lifecycle boundary is
+   * server-authoritative.
+   */
+  revokeBiometricReference(walletAddress: string):
+    | { ok: true; enrollmentState: 'revoked' }
+    | { ok: false; reason: 'unavailable' | 'not-found' | 'bad-state' } {
+    if (!this.biometricConfigured) return { ok: false, reason: 'unavailable' };
+    const record = this.store.getByWallet(walletAddress);
+    if (!record) return { ok: false, reason: 'not-found' };
+    const state = this.enrollmentStateFor(record);
+    if (state !== 'enrolled') return { ok: false, reason: 'bad-state' };
+    this.store.update(walletAddress, {
+      biometricRevokedAt: Date.now(),
+      identityVerified: false,
+    });
+    return { ok: true, enrollmentState: 'revoked' };
+  }
+
+  /**
+   * Replace an existing (revoked or live) reference with a new enrollment.
+   * Consumes a fresh enrollment session and bumps the reference version so old
+   * captured tokens (bound to an older version) cannot be replayed against the
+   * new reference. Restores `identityVerified` on success.
+   */
+  replaceBiometricReference(
+    walletAddress: string,
+    input: { token: string; embeddings: readonly FaceEmbedding[]; consent: boolean },
+  ):
+    | { ok: true; referenceVersion: number; enrollmentState: 'enrolled' }
+    | {
+        ok: false;
+        reason:
+          | 'unavailable'
+          | 'not-found'
+          | 'bad-state'
+          | 'no-consent'
+          | 'session-invalid'
+          | 'low-quality';
+      } {
+    if (!this.biometricConfigured) return { ok: false, reason: 'unavailable' };
+    const record = this.store.getByWallet(walletAddress);
+    if (!record) return { ok: false, reason: 'not-found' };
+    if (input.consent !== true) return { ok: false, reason: 'no-consent' };
+
+    const session = this.biometricSessions.consume(
+      input.token,
+      walletAddress,
+      'enrollment',
+      Date.now(),
+    );
+    if (!session) return { ok: false, reason: 'session-invalid' };
+
+    const derived = deriveEnrollmentReference(input.embeddings, this.biometricConfig);
+    if (!derived) return { ok: false, reason: 'low-quality' };
+
+    const nextVersion = (record.biometricReferenceVersion ?? 0) + 1;
+    const key = this.biometricKey as Buffer;
+    const reference: BiometricReference = {
+      embedding: derived.reference,
+      version: nextVersion,
+      enrolledAt: Date.now(),
+      consentAt: Date.now(),
+      selfSimilarity: derived.selfSimilarity,
+      spread: derived.spread,
+    };
+    const ciphertext = encryptBiometricReference(key, reference);
+    const now = Date.now();
+    this.store.update(walletAddress, {
+      biometricReferenceCipherText: ciphertext,
+      biometricReferenceVersion: nextVersion,
+      biometricEnrolledAt: now,
+      biometricConsentAt: now,
+      biometricRevokedAt: null,
+      identityVerified: true,
+    });
+    return { ok: true, referenceVersion: nextVersion, enrollmentState: 'enrolled' };
+  }
+
+  /**
+   * Begin a LOGIN face-match VERIFICATION session (after the five factors).
+   * Requires an ENROLLED, non-revoked reference. The issued single-use token is
+   * bound to the wallet AND the current reference version, so a token minted
+   * against an older reference cannot verify a newer one (replay protection
+   * across re-enrollment).
+   */
+  beginBiometricVerification(
+    walletAddress: string,
+  ):
+    | { ok: true; token: string; referenceVersion: number; expiresInMs: number }
+    | { ok: false; reason: 'unavailable' | 'not-found' | 'no-reference' | 'revoked' } {
+    if (!this.biometricConfigured) return { ok: false, reason: 'unavailable' };
+    const record = this.store.getByWallet(walletAddress);
+    if (!record) return { ok: false, reason: 'not-found' };
+    const state = this.enrollmentStateFor(record);
+    if (state === 'revoked') return { ok: false, reason: 'revoked' };
+    if (state !== 'enrolled') return { ok: false, reason: 'no-reference' };
+    const refVersion = record.biometricReferenceVersion ?? 0;
+    const s = this.biometricSessions.issue({
+      walletAddress,
+      purpose: 'verification',
+      referenceVersion: refVersion,
+      now: Date.now(),
+    });
+    return {
+      ok: true,
+      token: s.token,
+      referenceVersion: refVersion,
+      expiresInMs: this.biometricConfig.verificationTtlMs,
+    };
+  }
+
+  /**
+   * Server-authoritative LOGIN FACE MATCH. Consumes the single-use verification
+   * token (validating wallet binding + reference version), decrypts the stored
+   * reference, computes the REAL cosine similarity against the submitted live
+   * embedding, and returns ONLY a verdict + real score. Any client-supplied
+   * `matched`/`score`/`isHuman` field is ignored — the verdict is derived here.
+   */
+  verifyBiometricMatch(
+    walletAddress: string,
+    input: {
+      verificationToken: string;
+      liveEmbedding: FaceEmbedding;
+    },
+  ): {
+    ok: true;
+    verdict: Extract<BiometricVerdict, 'matched' | 'mismatch'>;
+    score: number;
+    referenceVersion: number;
+  } | {
+    ok: false;
+    verdict: Exclude<BiometricVerdict, 'matched' | 'mismatch'>;
+  } {
+    if (!this.biometricConfigured) return { ok: false, verdict: 'provider_unavailable' };
+    const record = this.store.getByWallet(walletAddress);
+    if (!record) return { ok: false, verdict: 'no_reference' };
+    if (record.biometricRevokedAt !== null) return { ok: false, verdict: 'reference_revoked' };
+    if (!record.biometricReferenceCipherText) return { ok: false, verdict: 'no_reference' };
+
+    const session = this.biometricSessions.consume(
+      input.verificationToken,
+      walletAddress,
+      'verification',
+      Date.now(),
+    );
+    if (!session) return { ok: false, verdict: 'session_invalid' };
+    // Replay / version protection: the token must match the CURRENT reference
+    // version (a token minted against an older reference can't verify a newer).
+    if (session.referenceVersion !== (record.biometricReferenceVersion ?? 0)) {
+      return { ok: false, verdict: 'session_invalid' };
+    }
+
+    const key = this.biometricKey as Buffer;
+    const reference = decryptBiometricReference(
+      key,
+      record.biometricReferenceCipherText,
+    ) as BiometricReference | null;
+    if (!reference) return { ok: false, verdict: 'error' };
+
+    const result = compareToReference(input.liveEmbedding, reference.embedding, this.biometricConfig);
+    if (result.verdict === 'matched' || result.verdict === 'mismatch') {
+      return {
+        ok: true,
+        verdict: result.verdict,
+        score: result.score ?? 0,
+        referenceVersion: reference.version,
+      };
+    }
+    return { ok: false, verdict: result.verdict };
+  }
+
+  /**
+   * Server-authoritative gate for the COMBINED registration identity evidence
+   * (real landmark liveness + live browser location). A bare boolean CANNOT
+   * satisfy it: `rejectIdentityEvidence` validates liveness + a fresh,
+   * accurate, in-range location fix. Returns the acceptance decision WITHOUT
+   * storing or echoing raw coordinates, landmarks, or biometric values.
+   */
+  recordIdentityEvidence(
+    walletAddress: string,
+    evidence: IdentityEvidence | null | undefined,
+  ):
+    | { ok: true; accepted: boolean; receivedAtMs: number }
+    | { ok: false; reason: 'not-found' | 'identity-evidence-rejected' } {
+    const record = this.store.getByWallet(walletAddress);
+    if (!record) return { ok: false, reason: 'not-found' };
+    const now = Date.now();
+    const denial = rejectIdentityEvidence(evidence, now);
+    if (denial) return { ok: false, reason: 'identity-evidence-rejected' };
+    // Evidence past structural/freshness/range validation; we deliberately do
+    // NOT persist raw coordinates or any biometric marker.
+    return { ok: true, accepted: true, receivedAtMs: now };
   }
 
   // ── Login ──────────────────────────────────────────────────────────

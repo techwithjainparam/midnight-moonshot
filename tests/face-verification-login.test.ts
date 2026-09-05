@@ -66,6 +66,7 @@ function makeServerConfig(): ServerConfig {
     registry: { officerToken: '' },
     account: {
       encryptionSecret: 'face-account-enc-secret',
+      biometricEncryptionSecret: '',
       dbPath: '',
       smsConfigured: true,
       whatsappConfigured: true,
@@ -90,6 +91,11 @@ function baseRecord(overrides: Partial<AccountRecord> = {}): AccountRecord {
     googleLinked: true,
     identityVerified: true,
     createdAt: 1_700_000_000_000,
+    biometricReferenceCipherText: null,
+    biometricReferenceVersion: null,
+    biometricEnrolledAt: null,
+    biometricConsentAt: null,
+    biometricRevokedAt: null,
     ...overrides,
   };
 }
@@ -274,18 +280,29 @@ test('C1: client cannot self-assert a success — no matched field drives the ma
   assert.equal(after.state, 'verification_unavailable', 'a client assertion cannot flip an unavailable stage to success');
 });
 
-test('C2: AccountRecord has no biometric/face fields', () => {
+test('C2: AccountRecord stores only an ENCRYPTED reference + metadata — never raw biometric material', () => {
   const allowed = new Set([
     'accountId', 'walletAddress', 'passwordHash', 'passwordSalt',
     'piiCipherText', 'maskedMobile', 'maskedAadhaar', 'smsOtpVerified',
     'whatsappOtpVerified', 'googleLinked', 'identityVerified', 'createdAt',
+    'biometricReferenceCipherText', 'biometricReferenceVersion',
+    'biometricEnrolledAt', 'biometricConsentAt', 'biometricRevokedAt',
   ]);
-  for (const key of Object.keys(baseRecord())) {
+  const rec = baseRecord();
+  for (const key of Object.keys(rec)) {
     assert.ok(allowed.has(key), `unexpected AccountRecord field: ${key}`);
   }
-  assert.equal(Object.prototype.hasOwnProperty.call(baseRecord(), 'faceEmbedding'), false);
-  assert.equal(Object.prototype.hasOwnProperty.call(baseRecord(), 'faceReference'), false);
-  assert.equal(Object.prototype.hasOwnProperty.call(baseRecord(), 'faceTemplate'), false);
+  // Part 8: the record may hold an ENCRYPTED reference blob + lifecycle
+  // metadata, but NEVER a raw, in-the-clear biometric template/embedding.
+  assert.equal(Object.prototype.hasOwnProperty.call(rec, 'faceEmbedding'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(rec, 'faceReference'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(rec, 'faceTemplate'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(rec, 'biometricReference'), false);
+  // The encrypted blob must never be a bare 128-d embedding literal.
+  const blob = rec.biometricReferenceCipherText;
+  if (blob !== null) {
+    assert.equal(Array.isArray(blob), false, 'reference is stored encrypted as a string, not an array');
+  }
 });
 
 // ── D. Server: capabilities + fail-closed snapshot ───────────────────

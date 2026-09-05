@@ -23,6 +23,7 @@ import {
   verifySmsOtp,
   sendWhatsappOtp,
   verifyWhatsappOtp,
+  submitIdentityEvidence,
 } from '../auth/account-api';
 import { saveAccount, getAccount } from '../auth/account-store';
 
@@ -482,11 +483,13 @@ export default function UserRegistrationPage() {
           {regState?.complete && !livenessPassed && (
             <div className="liveness-insert">
               <RegistrationLiveness
-                onComplete={(result) => {
-                  // Liveness is not a fabricated boolean: only a real pass
-                  // advances registration to its completion state. A failure
-                  // keeps us on the liveness step for a retry.
-                  if (result.passed) setLivenessPassed(true);
+                onComplete={async (result) => {
+                  // Liveness is not a fabricated boolean: only a real pass —
+                  // combined with a validated server-side evidence read — advances
+                  // registration to its completion state.
+                  if (!result.passed) return;
+                  const evidenceOk = await submitEvidenceForRegistration(result, address);
+                  if (evidenceOk) setLivenessPassed(true);
                 }}
               />
             </div>
@@ -756,4 +759,31 @@ function factorStepMsg(reason: string, message?: string): string {
     default:
       return message ?? 'That step could not be completed. Try again.';
   }
+}
+
+/**
+ * Submit the combined registration identity evidence (real landmark liveness +
+ * live browser location) to the server-authoritative boundary. Returns true only
+ * when the server accepts it; a bare flag (e.g. a malformed or stale report or
+ * a coerced client boolean) is rejected and registration does not advance.
+ */
+async function submitEvidenceForRegistration(
+  result: { passed: boolean; locationEvidence: { latitude: number; longitude: number; accuracyMeters: number; timestampMs: number; nonce: string } | null },
+  walletAddress: string,
+): Promise<boolean> {
+  if (!result.locationEvidence) return false;
+  const loc = result.locationEvidence;
+  const payload = {
+    context: 'registration' as const,
+    livenessPassed: result.passed,
+    location: {
+      latitude: loc.latitude,
+      longitude: loc.longitude,
+      accuracyMeters: loc.accuracyMeters,
+      timestampMs: loc.timestampMs,
+      nonce: loc.nonce,
+    },
+  };
+  const r = await submitIdentityEvidence(walletAddress, payload);
+  return r.ok === true && r.data.accepted === true;
 }

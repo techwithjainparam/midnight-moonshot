@@ -1,48 +1,57 @@
-// PRIESTATE — Registration liveness check (Level 3 Part 4).
+// PRIESTATE — Real registration identity check (Level 3 Part 7).
 //
-// UNITS the pure liveness modules with the browser camera:
-//   * requests camera permission explicitly and shows a live preview,
-//   * walks the user through a RANDOMIZED sequence of observable motion
-//     challenges,
-//   * derives liveness ONLY from detected frame-to-frame motion (never a
-//     fake "isHuman" boolean),
-//   * fails closed on camera denied/unavailable and on unsupported challenges,
-//   * stops all camera tracks on finish or unmount — no retained access,
-//   * keeps every frame in memory; nothing is stored, logged, or uploaded.
+// A COMBINED live session that requires ALL of the following distinct signals
+// before registration identity verification can be considered complete:
+//   1. wallet/account authentication (enforced by the surrounding page), and
+//   2. camera permission, and
+//   3. a REAL face + randomized liveness challenge observed via 68-point
+//      landmarks (`@vladmandic/face-api`), and
+//   4. a mandatory, freshly-observed browser geolocation fix
+//      (`navigator.geolocation.watchPosition`).
 //
-// Honesty: this engine observes MOTION, not faces/poses/gestures. A real
-// provider can advertise more capability later; the state machine and this
-// component will happily drive blink/pose challenges once that exists, and
-// will still fail closed otherwise.
+// Capability honesty & fail-closed:
+//   * The real landmark provider is loaded lazily. If it (or its models) fail
+//     to load we do NOT fall back to a fake "isHuman" — we surface
+//     `vision_unavailable`. Motion-only would NOT satisfy "real" liveness.
+//   * Location is mandatory: denial or unavailability BLOCKS completion.
+//   * Browser GPS is NOT cryptographic physical-location attestation; we say so
+//     in the UI and only ever treat it as freshly-observed, user-granted signal.
+//
+// Cleanup guarantees:
+//   * the camera stream and the geolocation watcher are BOTH stopped on every
+//     exit path — pass, fail, cancel, and unmount.
+//   * no raw pixels, landmark coordinates, or coordinates are stored/logged/
+//     uploaded; frames are analysed in memory then discarded.
 
 import { useState, useCallback, useEffect, useRef } from 'react';
 import {
-  IN_MEMORY_VISION_CAPABILITIES,
-  analyzeFrameMotion,
-  assessFrameQuality,
-  type GreyFrame,
-} from '../liveness/vision-provider';
-import {
-  buildChallengeSequence,
-  sequenceIsEmpty,
-} from '../liveness/challenges';
-import {
-  createLivenessSession,
-  transitionLiveness,
-  type LivenessSession,
-} from '../liveness/state-machine';
-import { guidanceForQuality, motionHint } from '../liveness/guidance';
-import { requestCamera, type CameraHandle } from '../liveness/camera-capture';
+  requestCamera,
+  type CameraHandle,
+  type CameraErrorKind,
+  cameraErrorMessage,
+} from '../liveness/camera-capture';
+import { realLandmarkProvider, REAL_LANDMARK_CAPABILITIES, UNLOADED_BIOMETRIC_CAPABILITIES, type LandmarkProvider } from '../liveness/landmark-provider';
+import { deriveWitness, isUsableFace, type FaceLandmarkFrame } from '../liveness/landmark';
+import { verifyChallengeFrame, createChallengeTrack, VERIFIABLE_ACTIONS, type ChallengeTrack } from '../liveness/landmark-verifier';
+import { buildChallengeSequence, sequenceIsEmpty } from '../liveness/challenges';
+import { createLivenessSession, transitionLiveness, type LivenessSession } from '../liveness/state-machine';
+import { createLocationWatcher, type LocationSession, type LocationSessionState } from '../liveness/location-watcher';
 
 export interface LivenessResult {
   readonly passed: boolean;
   readonly completedAt: number;
+  /** Location fix evidence at completion time, when liveness passed. */
+  readonly locationEvidence: {
+    readonly latitude: number;
+    readonly longitude: number;
+    readonly accuracyMeters: number;
+    readonly timestampMs: number;
+    readonly nonce: string;
+  } | null;
 }
 
 interface RegistrationLivenessProps {
-  /** Callback with the liveness outcome (after a full pass or a failure). */
   readonly onComplete?: (result: LivenessResult) => void;
-  /** Number of randomized challenges to run. */
   readonly challengeCount?: number;
 }
 
@@ -50,31 +59,59 @@ export default function RegistrationLiveness({
   onComplete,
   challengeCount = 3,
 }: RegistrationLivenessProps) {
-  const [session, setSession] = useState<LivenessSession>(() =>
-    createLivenessSession([]),
-  );
+  const [session, setSession] = useState<LivenessSession>(() => createLivenessSession([]));
   const [camera, setCamera] = useState<CameraHandle | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
-  const [guidance, setGuidance] = useState<readonly string[]>([]);
+  const [location, setLocation] = useState<LocationSession | null>(null);
+  const [provider, setProvider] = useState<LandmarkProvider | null>(null);
+  const [statusNote, setStatusNote] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const prevFrameRef = useRef<GreyFrame | null>(null);
   const pendingSessionRef = useRef<LivenessSession>(session);
+  const tracksRef = useRef<Record<string, ChallengeTrack>>({});
+  const locationRef = useRef<LocationSession | null>(location);
+  const locationHandleRef = useRef<ReturnType<typeof createLocationWatcher> | null>(null);
+  const finishedRef = useRef(false);
 
-  /** Build a fresh randomized sequence, or reset to an empty (fail-closed) one. */
-  const freshSession = (): LivenessSession => {
-    const seq = buildChallengeSequence(IN_MEMORY_VISION_CAPABILITIES, challengeCount);
+  const buildSession = (): LivenessSession => {
+    // Only offer actions the 68-point mesh genuinely verifies.
+    const seq = buildChallengeSequence(REAL_LANDMARK_CAPABILITIES, challengeCount, Math.random, VERIFIABLE_ACTIONS);
     if (sequenceIsEmpty(seq)) return createLivenessSession([]);
     return createLivenessSession(seq);
   };
 
   const start = useCallback(async () => {
+    finishedRef.current = false;
     setCameraError(null);
-    setGuidance([]);
-    const s = freshSession();
+    setStatusNote(null);
+    setLocation(null);
+
+    // 1. Load the real landmark provider; fail closed if it can't load.
+    let prov: LandmarkProvider | null = null;
+    try {
+      prov = await realLandmarkProvider();
+      await prov.loadModels();
+    } catch {
+      prov = null;
+    }
+    if (!prov || (!prov.capabilities.faceDetection)) {
+      setProvider(prov);
+      setSession(createLivenessSession([]));
+      setStatusNote(
+        prov && prov.capabilities === UNLOADED_BIOMETRIC_CAPABILITIES
+          ? 'The face-landmark model could not be loaded on this device; real liveness is unavailable. Liveness was NOT simulated.'
+          : 'This browser/device does not support real landmark-based liveness. No check was simulated.',
+      );
+      return; // stays at a fail-closed state (no challenge, no pass)
+    }
+    setProvider(prov);
+
+    const s = buildSession();
     setSession(transitionLiveness(s, { type: 'start' }, Date.now()));
     pendingSessionRef.current = transitionLiveness(s, { type: 'start' }, Date.now());
+    tracksRef.current = {};
 
+    // 2. Start the camera and the location watcher together.
     try {
       const handle = await requestCamera();
       setCamera(handle);
@@ -86,82 +123,145 @@ export default function RegistrationLiveness({
       setSession(s2);
       pendingSessionRef.current = s2;
     } catch (err) {
-      const kind =
-        err instanceof Error && (err as unknown as { kind?: string }).kind
-          ? (err as unknown as { kind: 'denied' | 'unavailable' | 'unsupported' }).kind
+      const kind: CameraErrorKind =
+        err && typeof err === 'object' && 'kind' in err && (err as { kind?: CameraErrorKind }).kind
+          ? (err as { kind: CameraErrorKind }).kind
           : 'unavailable';
-      setCameraError(
-        kind === 'denied'
-          ? 'Camera permission was denied. Allow camera access and try again.'
-          : kind === 'unsupported'
-            ? 'This browser or device does not support camera capture.'
-            : 'No camera is available on this device.',
-      );
-      const ev = kind === 'denied'
-        ? ({ type: 'camera_denied' } as const)
-        : ({ type: 'camera_unavailable' } as const);
+      setCameraError(cameraErrorMessage(kind));
+      const ev = kind === 'denied' ? ({ type: 'camera_denied' } as const) : ({ type: 'camera_unavailable' } as const);
       const s2 = transitionLiveness(pendingSessionRef.current, ev, Date.now());
       setSession(s2);
       pendingSessionRef.current = s2;
+      return;
     }
+
+    // 3. Begin the mandatory location watch (independent signal).
+    const loc = createLocationWatcher();
+    locationRef.current = { state: 'requesting', evidence: null, message: null };
+    setLocation(locationRef.current);
+    loc.start();
+    setLocation(loc.getState());
+    // Keep the watcher handle for cleanup on unmount/expiry.
+    locationHandleRef.current = loc;
   }, [challengeCount]);
 
-  // Process each live frame: quality gate → challenge motion.
+  // Process each frame: quality gate → landmark challenge → state machine.
   const onFrame = useCallback(async () => {
     const cam = camera;
-    if (!cam) return;
-    const curr = cam.sample(16);
-    const quality = assessFrameQuality(curr);
-    setGuidance(guidanceForQuality(quality));
+    const prov = provider;
+    if (!cam || !prov) return;
+
+    const raw = cam.captureRaw(512);
+    const faces = await prov.detect(raw);
+    if (!faces) return; // provider failed → keep waiting (fail closed within attempts)
+
+    const usable = faces.filter((f) => isUsableFace(f)).slice(0, 1)[0];
+    const witness = deriveWitness(usable as FaceLandmarkFrame | null);
 
     let next = pendingSessionRef.current;
     if (next.state === 'camera_ready') {
-      // Hold at quality gate until a usable frame is observed.
-      if (!quality.usable) {
-        next = transitionLiveness(next, { type: 'frame', observation: { motionDetected: false, motionMagnitude: 0 } }, Date.now());
-        setSession(next);
+      // Wait for a usable single face before starting challenges.
+      if (!witness) {
+        setSession(transitionLiveness(next, { type: 'frame', observation: { motionDetected: false, motionMagnitude: 0 } }, Date.now()));
         pendingSessionRef.current = next;
         return;
       }
       next = transitionLiveness(next, { type: 'quality_ok' }, Date.now());
+      tracksRef.current = {};
     }
+
     if (next.state === 'challenge_active') {
-      const prev = prevFrameRef.current;
-      const obs = analyzeFrameMotion(prev, curr);
-      prevFrameRef.current = curr;
-      next = transitionLiveness(next, { type: 'frame', observation: obs }, Date.now());
+      const challenge = next.challenges[Math.min(next.currentChallengeIndex, next.challenges.length - 1)];
+      const key = challenge.id;
+      let track = tracksRef.current[key] ?? createChallengeTrack(challenge.action, Date.now());
+      const { next: ntrack, outcome } = verifyChallengeFrame(
+        track,
+        { frame: usable as FaceLandmarkFrame | null, witness },
+        {},
+      );
+      tracksRef.current = { ...tracksRef.current, [key]: ntrack };
+
+      // Advance the state machine ONLY on a genuine, observed completion.
+      const completed = outcome.status === 'completed';
+      next = transitionLiveness(next, { type: 'frame', observation: { motionDetected: completed, motionMagnitude: completed ? 0.5 : 0 } }, Date.now());
+    }
+    if (next.state === 'liveness_passed') {
+      // The separate `session`-watching effect performs the final pass gate
+      // (it re-checks the live location fix); all we do here is persist state.
+      setSession(next);
+      pendingSessionRef.current = next;
+      return;
     }
     setSession(next);
     pendingSessionRef.current = next;
-
-    if (next.state === 'liveness_passed') {
-      cam.stop();
-      setCamera(null);
-      prevFrameRef.current = null;
-      onComplete?.({ passed: true, completedAt: Date.now() });
-      return;
-    }
     if (isFailureOutcome(next)) {
-      cam.stop();
-      setCamera(null);
-      prevFrameRef.current = null;
-      onComplete?.({ passed: false, completedAt: Date.now() });
+      finish(false);
     }
+  }, [camera, provider]);
+
+  const finish = useCallback((passed: boolean) => {
+    if (finishedRef.current) return;
+    finishedRef.current = true;
+    const loc = locationHandleRef.current?.getState();
+    const locEvidence = passed && loc && loc.state === 'active' && loc.evidence
+      ? loc.evidence
+      : null;
+    if (camera) {
+      camera.stop();
+      setCamera(null);
+    }
+    if (locationHandleRef.current) {
+      locationHandleRef.current.stop();
+      locationHandleRef.current = null;
+    }
+    videoRef.current = null;
+    setLocation(null);
+    locationRef.current = null;
+    onComplete?.({
+      passed,
+      completedAt: Date.now(),
+      locationEvidence: locEvidence
+        ? {
+            latitude: locEvidence.latitude,
+            longitude: locEvidence.longitude,
+            accuracyMeters: locEvidence.accuracyMeters,
+            timestampMs: locEvidence.timestampMs,
+            nonce: locEvidence.nonce,
+          }
+        : null,
+    });
   }, [camera, onComplete]);
 
   useEffect(() => {
     if (!camera) return;
-    // Poll the live video for frames while the challenge is active.
     const id = window.setInterval(() => {
       void onFrame();
     }, 120);
     return () => window.clearInterval(id);
   }, [camera, onFrame]);
 
-  // Always stop the camera on unmount.
+  // Once liveness AND a live, fresh location fix both hold → pass. This also
+  // completes the flow if location arrives AFTER liveness already passed.
+  useEffect(() => {
+    if (finishedRef.current) return;
+    pendingSessionRef.current = session;
+    if (session.state === 'liveness_passed') {
+      const loc = locationHandleRef.current?.getState();
+      if (loc && loc.state === 'active' && loc.evidence) {
+        void finish(true);
+        return;
+      }
+      if (loc) setStatusNote('Liveness confirmed. Finalising location…');
+    }
+  }, [session, finish]);
+
+  // Unmount cleanup: stop camera + location watcher.
   useEffect(() => {
     return () => {
       if (camera) camera.stop();
+      if (locationHandleRef.current) locationHandleRef.current.stop();
+      locationHandleRef.current = null;
+      locationRef.current = null;
       pendingSessionRef.current = createLivenessSession([]);
     };
   }, [camera]);
@@ -171,11 +271,14 @@ export default function RegistrationLiveness({
       camera.stop();
       setCamera(null);
     }
-    prevFrameRef.current = null;
+    if (locationHandleRef.current) {
+      locationHandleRef.current.stop();
+      locationHandleRef.current = null;
+    }
+    tracksRef.current = {};
     setCameraError(null);
-    setGuidance([]);
-    const s = freshSession();
-    setSession(s);
+    setLocation(null);
+    setStatusNote(null);
     void start();
   }, [camera, start]);
 
@@ -188,22 +291,18 @@ export default function RegistrationLiveness({
     session.state === 'challenge_active' && activeChallenge
       ? activeChallenge.instruction
       : session.state === 'camera_ready'
-        ? 'Preparing…'
+        ? 'Detecting your face…'
         : session.state === 'liveness_passed'
           ? 'Liveness passed'
           : 'Starting…';
-
-  const challengeLabel =
-    session.challenges.length > 0 && session.state === 'challenge_active'
-      ? `Challenge ${session.currentChallengeIndex + 1} of ${session.challenges.length}`
-      : '';
 
   return (
     <section className="liveness-card" aria-label="Live identity check">
       <h2 className="liveness-title">Live Identity Check</h2>
       <p className="liveness-subtitle">
-        Follow the instruction shown below. Registration is complete only after
-        this liveness check succeeds — a static photo or replay cannot pass.
+        This requires a live face, and your permission for both your camera and
+        your current location. A static photo, replay, or faked report cannot
+        pass.
       </p>
 
       <div className="liveness-preview">
@@ -222,11 +321,9 @@ export default function RegistrationLiveness({
               ? 'Camera permission denied'
               : session.state === 'camera_unavailable'
                 ? 'Camera unavailable'
-                : session.state === 'vision_unavailable'
-                  ? 'Liveness unavailable on this device'
-                  : session.state === 'liveness_passed'
-                    ? 'Liveness passed'
-                    : 'Camera preview'}
+                : session.state === 'liveness_passed'
+                  ? 'Liveness passed'
+                  : 'Camera preview'}
           </div>
         )}
       </div>
@@ -238,22 +335,25 @@ export default function RegistrationLiveness({
           ))}
         </div>
         <p className="liveness-instruction">{progressText}</p>
-        {challengeLabel && <span className="liveness-counter">{challengeLabel}</span>}
-        {guidance.length > 0 && (
-          <ul className="liveness-guidance">
-            {guidance.map((g, i) => (
-              <li key={i}>{g}</li>
-            ))}
-            {session.state === 'challenge_active' && (
-              <li>{motionHint(session.currentAttempts)}</li>
-            )}
-          </ul>
+        {activeChallenge && <span className="liveness-counter">Challenge {session.currentChallengeIndex + 1} of {session.challenges.length}</span>}
+
+        {location && (
+          <div className="liveness-location" role="status">
+            {location.state === 'active'
+              ? `Location locked (accuracy ±${Math.round(location.evidence!.accuracyMeters)} m).`
+              : location.state === 'requesting'
+                ? 'Requesting your location…'
+                : locationMessage(location.state)}
+          </div>
+        )}
+        {statusNote && (
+          <div className="status-msg error" role="alert">{statusNote}</div>
         )}
       </div>
 
       {(session.state === 'idle' || session.state === 'requesting_camera') && !camera && (
         <button type="button" className="btn btn-primary" onClick={() => void start()}>
-          Start liveness check
+          Start identity check
         </button>
       )}
 
@@ -261,53 +361,60 @@ export default function RegistrationLiveness({
         <div className="status-msg error" role="alert">{cameraError}</div>
       )}
       {session.state === 'camera_denied' && (
-        <div className="status-msg error" role="alert">
-          Camera permission was denied. Allow camera access and try again.
-        </div>
+        <div className="status-msg error" role="alert">Camera permission was denied. Allow camera access and try again.</div>
       )}
       {session.state === 'camera_unavailable' && (
-        <div className="status-msg error" role="alert">
-          No camera was found, or the camera is in use elsewhere.
-        </div>
+        <div className="status-msg error" role="alert">No camera was found, or the camera is in use elsewhere.</div>
       )}
       {session.state === 'vision_unavailable' && (
         <div className="status-msg error" role="alert">
-          Liveness cannot be verified on this device/browser because the vision
-          capability is unavailable. No check was simulated.
+          Real liveness cannot be verified on this device/browser (landmark model
+          unavailable). No check was simulated and location is not used to fake one.
         </div>
       )}
       {session.state === 'challenge_failed' && (
-        <div className="status-msg error" role="alert">
-          We could not confirm the requested movement. Please try again.
-        </div>
+        <div className="status-msg error" role="alert">We could not confirm the requested movement. Please try again.</div>
       )}
       {session.state === 'timeout' && (
-        <div className="status-msg error" role="alert">
-          The liveness check timed out. Please try again.
-        </div>
+        <div className="status-msg error" role="alert">The identity check timed out. Please try again.</div>
       )}
 
       <p className="liveness-privacy">
-        Privacy: your camera feed is processed entirely in memory and is never
-        stored, logged, or uploaded. We stop using the camera as soon as this
-        check finishes.
+        Privacy: your camera feed is analysed in memory and never stored, logged,
+        or uploaded. Your location permission is used only for this check and
+        watched live — it is not shared with the ledger. Browser location is not a
+        cryptographic proof of physical presence.
       </p>
 
       {isFailureOutcome(session) && (
-        <div className="status-msg error" role="alert">
-          Liveness could not be confirmed. Please try again.
-        </div>
+        <div className="status-msg error" role="alert">Identity could not be confirmed. Please try again.</div>
       )}
       {isFailureOutcome(session) && (
-        <button type="button" className="btn btn-ghost" onClick={() => void retry()}>
-          Retry
-        </button>
+        <button type="button" className="btn btn-ghost" onClick={() => void retry()}>Retry</button>
       )}
     </section>
   );
 }
 
-/** True when a liveness session ended in a non-pass failure state. */
 function isFailureOutcome(session: LivenessSession): boolean {
   return session.finalOutcome !== null && session.state !== 'liveness_passed';
+}
+
+function locationMessage(state: LocationSessionState): string {
+  switch (state) {
+    case 'location_denied':
+      return 'Location permission was denied — required to complete identity verification.';
+    case 'location_unavailable':
+      return 'No location signal available. Move near a window and wait.';
+    case 'location_timeout':
+      return 'Could not acquire location in time. Retry.';
+    case 'location_stale':
+      return 'Location fix is stale. Retry.';
+    case 'location_accuracy_insufficient':
+      return 'Location accuracy is too coarse. Move outdoors and retry.';
+    case 'location_invalid_cache':
+      return 'Reported location is invalid. Retry.';
+    default:
+      return 'Location unavailable.';
+  }
 }
