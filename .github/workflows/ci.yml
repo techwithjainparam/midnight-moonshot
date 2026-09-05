@@ -23,6 +23,26 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # The `compact` CLI is a standalone toolchain (NOT an npm dependency):
+      # install the official launcher pinned to a release tag (never
+      # releases/latest) and pin the compiler via `compact update`.
+      # Pins deliberately match the local dev environment
+      # (compact CLI 0.5.1 -> toolchain 0.31.1 / language 0.23.0, the pair
+      # paired with @midnight-ntwrk/compact-runtime@0.16.0).
+      - name: Install compact toolchain (pinned)
+        run: |
+          export PATH="$HOME/.local/bin:$HOME/.compact/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.compact/bin" >> "$GITHUB_PATH"
+          if ! command -v compact >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -LsSf --retry 4 -o /tmp/compact-installer.sh \
+              https://github.com/midnightntwrk/compact/releases/download/compact-v0.5.1/compact-installer.sh
+            sh /tmp/compact-installer.sh
+          fi
+          compact update 0.31.1
+          compact --version
+          compact compile --version
+
       - name: Compact compile
         run: npm run compile
 
