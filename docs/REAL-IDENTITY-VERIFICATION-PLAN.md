@@ -387,3 +387,120 @@ This section records the J.4 implementation: REAL provider code paths (outbound 
 - `npm run build` — clean; the `jose` dependency is never bundled into the client.
 - Real vs PROVIDER-READY vs NOT-AVAILABLE: the Google flow and the SMS/WhatsApp transports are **REAL/PROVIDER-READY** — fully implemented and tested; they report `unavailable` (fail closed) only because live third-party credentials are not shipped. NOT-AVAILABLE blobs (real CV / official Aadhaar KYC) were not touched.
 - Midnight Compact contract, wallet, and deployed state **untouched**; no new secrets, PII, or biometric/location data introduced. Nothing committed or pushed.
+
+---
+
+## Part J.5 — REAL Aadhaar / KYC Identity Verification Architecture (AUDIT + RESEARCH, no code)
+
+**Scope:** This is a **research/audit ONLY** deliverable for the safest real production KYC architecture. No application code, contracts, wallet, deployment, env, or tests were modified. The sole file updated is this document. Research date: 2026-09-05.
+
+**Ground zero (unchanged invariant):** PRIVESTATE never stores raw Aadhaar numbers, DOB, address, or biometrics on the public Midnight ledger, in `localStorage`, URLs, query strings, logs, or frontend source. Full Aadhaar e-KYC (real number) is obtainable only by **Global AUAs**; **Local AUAs and OVSEs** operate on masked numbers / verifiable credentials / UID tokens and may NOT retain real Aadhaar numbers.
+
+### J.5.1 Existing Aadhaar boundary (audit — already provider-agnostic, fail-closed)
+
+- `server/services/identity-provider.ts` + `identity-provider-types.ts`: `IdentityVerificationProvider` with two modes — **direct link-check** (POST mobile → vendor answers linked/not-linked) and **OTP challenge/submit** (vendor OTPs the registered mobile). `available=false` unless server-only credentials (`AADHAAR_KYC_PROVIDER/_API_TOKEN/_BASE_URL/_MOBILE_LINK_PATH/_[CHALLENGE|SUBMIT]_PATH/_AUTH_SCHEME`) are configured.
+- Receipts (`AadhaarMobileReceipt`) carry only `providerVerificationId` + status + ISO timestamp — **Aadhaar numbers are never requested, stored, or echoed**.
+- Ambiguous vendor responses **fail closed** (`provider-error`); the UI reports "not available in this demo" when unconfigured.
+- Wired routes: `routeAadhaarStart` / `routeAadhaarComplete` (`server/index.ts:1187,1239`) are rate-limited per-IP and return 503 when the provider is unavailable.
+- **Audit verdict:** this seam is sound and already satisfies "never claims UIDAI verification without an authorized integration." It is the correct place to hang a real authorized provider. What it does NOT currently cover: full e-KYC (name/address match), the OVSE verifiable-credential path, and Midnnight on-chain assertion binding.
+
+### J.5.2 The UIDAI / legal compliance boundary (verified against authoritative sources)
+
+Classify each integration tier by what PRIVESTATE can legally and technically do TODAY. Legitimacy = an actually authorized/usable provider API exists AND PRIVESTATE holds the credentials.
+
+| Tier | Path | What you can legally do | Sandbox? | Onboarding for this project | Verdict |
+|---|---|---|---|---|---|
+| **A. Mobile-link check (vendor)** | Authorized KYC vendor (Surepass, Karza/Perfios, Signzy, IDfy, Protean) | Vendor answers "is this mobile linked to an Aadhaar?" (yes/no only; no PII returned) | **Yes — instant free sandbox** (Perfios: 10k+ free test credits, no card, 3-min signup; Signzy/Protean: sandbox too) | **Business/entity signup + commercial agreement** + real API keys; sandbox keys are test-only | **REAL IMPLEMENTABLE** as an integration (sandbox) but **production needs the vendor's authorized credentials** → **B** |
+| **B. OVSE verifiable credential (SD-JWT)** | UIDAI OVSE (Offline Verification Seeking Entity); Aadhaar App | Consent-based, offline, **privacy-preserving**; ANH selectively discloses signed Aadhaar attributes (name/DOB/address/masked mobile); verifier validates **UIDAI digital signature** + disclosure hashes; **no Aadhaar number transmitted/stored**; optional offline face proof-of-presence | Portal (`ovse.uidai.gov.in`) + docs sandbox available | **Entity-level only**: PAN, Certificate of Incorporation/CIN, company profile, self-declaration, registered domain, callback URL, **Class 3 public certificate**, sign+email to UIDAI | **BEST privacy fit for on-chain** → build seam now; register OVSE to activate → **B/C** |
+| **C. UIDAI AUA/KUA e-KYC API 2.5** | Direct AUA (authentication) / KUA (e-KYC) | Global AUA: **full e-KYC (real Aadhaar number), may store it**. Local AUA: **limited/masked-only, may NOT store Aadhaar numbers**, UID Token internally | Developer sandbox (`developer.uidai.gov.in`) exists but **requires AUA/ASA credentials** | Formal application: Board resolution, legal basis (Aadhaar Act §7 / §4(4)(b)), PMLA read-ins, audit/compliance checklists, network setup | **NOT LEGITIMATELY IMPLEMENTABLE** without UIDAI authorization → **C** |
+| **D. Unauthorized/DIY** | Any non-authorized source, scraped feeds, `confirmed:true`, or self-assertion | **Illegal / dishonest.** Risks UIDAI/DPDP penalties; misrepresents identity | n/a | n/a | **NEVER** |
+
+**Compliance facts that constrain design:**
+- **Aadhaar masking is mandatory** for any stored Aadhaar (UIDAI + RBI KYC Master Direction + IRDAI + SEBI): mask the first 8 digits; **do not store real Aadhaar numbers**. Aadhaar Verification responses must follow the provider's **zero-storage policy** for Aadhaar numbers and biometric data.
+- **Explicit, informed, auditable consent is required before every Aadhaar authentication/verification request** — consent must be captured before the API call and written to the audit trail.
+- **Audit trail at response-time**: every verification response (status, timestamp, provider id) must be written to the audit log at the moment of response, not reconstructed later.
+- **OVSE registration** enables the Aadhaar App credential exchange (SD-JWT) — the **only** path that yields a verifiable, non-correlatable, offline identity assertion without ever touching the Aadhaar number, making it the best fit for a Midnight privacy-preserving commitment.
+- **DPDP / Aadhaar Act storage limits** apply even to vendors; never cache/persist sensitive ID data anywhere in our stack.
+
+### J.5.3 Authorized provider capability comparison
+
+| Provider | Aadhaar verification offered | Mobile-link check | Full e-KYC (real Aadhaar) | Sandbox for devs | OVSE-compatible / notes |
+|---|---|---|---|---|---|
+| **Perfios / Karza** | Aadhaar Verification API, Aadhaar XML download/verify | Yes | Yes (as Global AUA-side provider) | **Instant, 10k+ free credits, no card** | Zero-storage policy; 200+ APIs via Perfios Hub; consent + audit built-in guidance |
+| **Surepass** | Aadhaar Verification (consent-based, QR scan flow) | Yes | Yes | On request | UIDAI OVSE/authorized framework |
+| **Signzy** | Aadhaar Verification (`POST /api/v3/aadhaar/verify`), eSign, Video KYC | Yes | Yes | **Yes** (thorough sandbox; 5000 INR startup credit) | 240+ APIs; masked demographic response; data residency India |
+| **IDfy** | Identity verification suite, **Aadhaar Masking API**, Aadhaar XML, OCR, liveness, face match | Yes | Yes | API key + account-id (via vendor) | UIDAI-ready masking; SOC 2 Type II |
+| **Protean (RISE)** | Aadhaar e-KYC (OTP + consent), Aadhaar XML, PAN, DigiLocker, CKYC/CKYCRR | Yes | Yes | **Yes** (unified sandbox) | 100+ regulated APIs; compliance-first |
+
+**Recommended provider-agnostic stance:** the code must not hard-code any single vendor. Any of the above can populate `AADHAAR_KYC_*`; choose on **sandbox availability + per-call cost + zero-storage guarantee + audit-tooling** at activation time. Perfios (Karza) and Signzy give the fastest self-serve sandbox for verification; Protean is strongest for compliance-first scale.
+
+### J.5.4 Recommended architecture — provider-agnostic `AadhaarKycProvider` (design)
+
+Extend the existing seam (keeps `IdentityVerificationProvider` for the mobile-link check) with a second, higher-assurance contract for KYC/identity assertions. Both are server-side-only; neither ever leaks raw PII.
+
+```ts
+// server/services/aadhaar-kyc-provider.ts (DESIGN — not implemented in J.5)
+export interface AadhaarKycProvider {
+  readonly name: string;            // recorded in receipts/audit
+  readonly available: boolean;      // false unless real authorized creds configured
+
+  // 1. Begin a wallet-bound, single-use, short-TTL verification session.
+  beginVerification(input: {
+    wallet: string;
+    nonce: string;                  // server-minted, bound to wallet + txn
+  }): Promise<BeginKycResult>;      // 'redirect|qrcode|otp-challenge' + session
+
+  // 2. Provider redirect / app callback posts an OVSE SD-JWT or vendor verdict.
+  handleCallback(input: {
+    sessionId: string;
+    assertionRaw: string;           // SD-JWT (OVSE) or vendor receipt, server-only
+  }): Promise<CallbackResult>;
+
+  // 3. Validate the provider's signature/assertion and return a normalized,
+  //    MINIMAL, non-PII identity assertion (see J.5.5).
+  verifyAssertion(input: {
+    assertion: VerifiedCredential;
+    expectedWallet: string;
+    expectedNonce: string;
+    expectedIssuer: string;         // e.g. UIDAI
+  }): Promise<{ ok: true; assertion: VerifiedIdentityAssertion } | { ok: false; reason: VerifyFailReason }>;
+
+  // 4. One-time retrieval of the normalized result (used by the account service).
+  getVerificationResult(sessionId: string): Promise<FinalKycResult | null>;
+}
+```
+
+**Session/security invariants (all required for REAL production, mirroring existing biometric sessions):**
+- short-lived (e.g. 5–10 min) single-use sessions; replay of a consumed `sessionId`/`jti`/`nonce` is rejected.
+- `ExpectedIssuer`/`aud`/`iss` validation; for OVSE SD-JWT additionally validate the **UIDAI public-key signature** and **disclosure hashes** (`_sd`), mirroring the existing `jose` JWKS pattern in `google-oidc.ts`.
+- Server-side-only credentials (`AADHAAR_KYC_*`), never in VITE; no raw PII in URLs, query strings, `localStorage`, or logs.
+- `wallet` + `nonce` binding prevents credential-replay across accounts.
+- Fail closed: missing provider, ambiguous verdict, bad signature, expiry, replay, network error ⇒ `unavailable`/`error`, never fabricated success.
+
+### J.5.5 Midnight on-chain integration (privacy-preserving, never raw PII)
+
+On-chain we carry **only a commitment/assertion proof**, never identity data:
+- **VerifiedIdentityAssertion** (server→account, stays off-ledger but is the source of truth for `identityVerified`):
+  `{ provider, providerVerificationId, verifiedAt, level: 'mobile-link'|'kyc', proofType: 'vendor-verdict'|'ovse-sd-jwt', nonce }` — **no name, DOB, address, Aadhaar number**.
+- **On-chain nullifier:** derive `H(providerVerificationId || wallet)` public-nullifier pattern so the same verified receipt cannot be double-applied, while revealing nothing about the identity. This mirrors the Compact contract's existing nullifier/commitment style (no contract changes were made in J.5).
+- **Registration state:** the on-chain state machine continues to expose only booleans (`identityVerified`/factor flags). `identityVerified=true` is set **only** server-side after `verifyAssertion` succeeds (with nonce/expiry to prevent stale-result replay), exactly as in the biometric path (`service.ts` — the insecure `markIdentityVerified` already removed in Part 8).
+- **Consent + audit:** explicit user consent captured before the call and an audit-trail line written at response-time (provider, status, timestamp, providerVerificationId) — no raw PII in the audit record.
+- **Interaction with existing biometrics:** the KYC/OVSE path is an **independent** identity signal from biometric liveness/matching. Do **not** store a second biometric reference; reuse the existing `biometricReference` for login face match, and treat KYC/OVSE as an alternative or complement that can set the same server-authoritative `identityVerified`.
+
+### J.5.6 Recommendation (single, unambiguous)
+
+**Recommendation B — Build the provider-agnostic abstraction now; production activation requires authorized credentials; escalate to an OVSE registration to unlock the best privacy-preserving path.**
+
+Rationale:
+1. The mobile-link-check seam (`IdentityVerificationProvider`) already exists and is sound; production "activation" today is blocked only by **authorized vendor credentials**, which require an entity/business onboarding step (any of Perfios/Karza, Signzy, IDfy, Protean — all real, sandbox-available).
+2. The **UIDAI OVSE / Aadhaar Verifiable Credential (SD-JWT)** path is the **best long-term fit for Midnight** (offline, consent-based, selective disclosure, no Aadhaar number ever transmitted/stored, UIDAI-signed, replay-resistant `jti`/`aud`), but OVSE registration is **entity-level** (PAN + CIN + Class 3 cert + email to UIDAI) — not achievable from a solo/hackathon seat. Build the `AadhaarKycProvider` seam to target it so activation is a config + credential step later.
+3. **Do not** pursue direct UIDAI AUA/KUA (Tier C) until the project is an incorporated, PII/DPDP-compliant regulated entity — this is correctly gated as "not legitimately implementable without authorization" today.
+4. **Never** fall back to Tier D (bare `confirmed:true`, un-authorized sources). PRIVESTATE already removed the insecure `markIdentityVerified`; this invariant is preserved.
+
+**Concrete next step when authorized access is obtained (not in J.5 scope):** pick a vendor (start with Perfios/Karza or Signzy for fastest sandbox), populate `AADHAAR_KYC_*` server env, confirm the response schema maps to the existing `interpretLinkResponse`, and (for the OVSE path) register as an OVSE, then wire SD-JWT verification behind `verifyAssertion`.
+
+### J.5.7 What J.5 did NOT change
+
+- No source, contract, wallet, deployment, env, or tests modified (`git status` clean; branch still 10 commits ahead of `origin/main`, baseline `70711bc`).
+- The Aadhaar-mobile verification remains **provider-ready / unavailable** (fail-closed) until authorized credentials are supplied — this document makes no claim that UIDAI/Aadhaar verification is live.
+- On-chain PII privacy invariants (enforced by `account-privacy.test.ts`) remain intact.
