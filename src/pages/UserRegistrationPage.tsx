@@ -17,14 +17,13 @@ import {
   registerAccount,
   fetchAccountCapabilities,
   checkAccountExists,
-  beginGoogle,
-  completeGoogleWithState,
   sendSmsOtp,
   verifySmsOtp,
   sendWhatsappOtp,
   verifyWhatsappOtp,
   submitIdentityEvidence,
 } from '../auth/account-api';
+import { useGoogleSignIn } from '../auth/google-oauth';
 import { saveAccount, getAccount } from '../auth/account-store';
 
 // FEATURE 3 — Secure user registration (`/register-account`).
@@ -76,8 +75,6 @@ export default function UserRegistrationPage() {
   const [busyFactor, setBusyFactor] = useState<RegistrationFactor | null>(null);
   const [stepMessage, setStepMessage] = useState<string | null>(null);
   const [stepError, setStepError] = useState<string | null>(null);
-  const [googleChallenge, setGoogleChallenge] = useState<{ state: string; nonce: string } | null>(null);
-  const [googleCode, setGoogleCode] = useState('');
   const [smsCode, setSmsCode] = useState('');
   const [whatsappCode, setWhatsappCode] = useState('');
   const [smsSentAt, setSmsSentAt] = useState<number | null>(null);
@@ -208,51 +205,18 @@ export default function UserRegistrationPage() {
     });
   };
 
-  const handleBeginGoogle = useCallback(async () => {
-    if (!address) return;
-    setStepError(null);
-    setBusyFactor('google');
-    try {
-      const r = await beginGoogle(address);
-      if (!r.ok) {
-        setStepError(`Google: ${factorStepMsg(r.reason, r.message)}`);
-        return;
-      }
-      setGoogleChallenge({ state: r.data.state, nonce: r.data.nonce });
-      setStepMessage('Google sign-in started. Enter the one-time authorization code to link your account.');
-    } finally {
-      setBusyFactor(null);
-    }
-  }, [address]);
+  // Google factor (real OAuth popup flow, J.4). Linking is server-authoritative:
+  // the account is marked Google-verified only after a server-side verified
+  // OAuth redirect + challenge completion. The client never sees a code.
+  const handleGoogleLinked = useCallback(() => {
+    applyFactor({ googleVerified: true });
+    setStepMessage(regState?.whatsappVerified && regState?.smsVerified
+      ? 'Google linked. Registration authentication is complete.'
+      : 'Google linked. Next: SMS OTP.');
+    setActiveFactor(regState?.whatsappVerified ? null : regState?.smsVerified ? 'whatsapp' : 'sms');
+  }, [regState]);
 
-  const handleCompleteGoogle = useCallback(async () => {
-    if (!address || !googleChallenge) return;
-    if (!googleChallenge || googleCode.trim().length < 4) {
-      setStepError('Enter the one-time authorization code to continue.');
-      return;
-    }
-    setStepError(null);
-    setBusyFactor('google');
-    try {
-      const r = await completeGoogleWithState(address, {
-        state: googleChallenge.state,
-        nonce: googleChallenge.nonce,
-        code: googleCode.trim(),
-      });
-      if (!r.ok) {
-        setStepError(`Google: ${factorStepMsg(r.reason, r.message)}`);
-        setGoogleChallenge(null);
-        return;
-      }
-      applyFactor({ googleVerified: true });
-      setGoogleCode('');
-      setGoogleChallenge(null);
-      setStepMessage('Google linked. Next: SMS OTP.');
-      setActiveFactor(regState?.smsVerified ? 'whatsapp' : 'sms');
-    } finally {
-      setBusyFactor(null);
-    }
-  }, [address, googleChallenge, googleCode, regState]);
+  const google = useGoogleSignIn(address, handleGoogleLinked);
 
   const handleSendSms = useCallback(async () => {
     if (!address) return;
@@ -381,7 +345,7 @@ export default function UserRegistrationPage() {
               sms: Boolean(caps?.smsConfigured),
               whatsapp: Boolean(caps?.whatsappConfigured),
             }}
-            busyFactor={busyFactor}
+            busyFactor={google.busy && !busyFactor ? 'google' : busyFactor}
             message={stepMessage || (activeFactor ? `Complete the ${activeFactor === 'google' ? 'Google' : activeFactor === 'sms' ? 'SMS OTP' : 'WhatsApp OTP'} step.` : null)}
           />
 
@@ -391,34 +355,38 @@ export default function UserRegistrationPage() {
                 {activeFactor === 'google' ? 'Google (step 2 of 4)' : activeFactor === 'sms' ? 'SMS OTP (step 3 of 4)' : 'WhatsApp OTP (step 4 of 4)'}
               </h2>
 
-              {activeFactor === 'google' && !googleChallenge && (
-                <div className="account-card-actions">
-                  <button className="btn btn-primary" onClick={() => void handleBeginGoogle()} disabled={busyFactor === 'google' || !caps?.googleConfigured}>
-                    {!caps?.googleConfigured ? 'Google unavailable on server' : busyFactor === 'google' ? 'Starting…' : 'Start Google sign-in'}
-                  </button>
-                  {!caps?.googleConfigured && (
-                    <span className="status-msg error" role="alert">Google is not configured on the verification server — this factor cannot be completed.</span>
-                  )}
-                </div>
+              {/* Google (step 2): real OAuth popup flow — the client never handles a code. */}
+          {activeFactor === 'google' && !google.challenge && (
+            <div className="account-card-actions">
+              <button className="btn btn-primary" onClick={() => void google.begin()} disabled={busyFactor === 'google' || !caps?.googleConfigured || google.busy}>
+                {!caps?.googleConfigured ? 'Google unavailable on server' : google.busy ? 'Starting…' : 'Start Google sign-in'}
+              </button>
+              {!caps?.googleConfigured && (
+                <span className="status-msg error" role="alert">Google is not configured on the verification server — this factor cannot be completed.</span>
               )}
+            </div>
+          )}
 
-              {activeFactor === 'google' && googleChallenge && (
-                <div className="form-field">
-                  <label className="form-label">Google authorization code</label>
-                  <input
-                    type="text"
-                    autoComplete="off"
-                    className="form-input"
-                    placeholder="One-time authorization code"
-                    value={googleCode}
-                    onChange={(e) => setGoogleCode(e.target.value)}
-                  />
-                  <button className="btn btn-primary" onClick={() => void handleCompleteGoogle()} disabled={busyFactor === 'google' || googleCode.length < 4}>
-                    {busyFactor === 'google' ? 'Verifying…' : 'Confirm Google sign-in'}
-                  </button>
-                  <span className="form-hint">The challenge nonce is held server-side and never placed in a URL or stored locally.</span>
-                </div>
+          {activeFactor === 'google' && google.challenge && (
+            <div className="form-field">
+              <button className="btn btn-primary" onClick={() => void google.begin()} disabled={busyFactor === 'google' || google.busy}>
+                {google.busy ? 'Starting…' : 'Reopen Google sign-in'}
+              </button>
+              <button className="btn btn-ghost" onClick={() => void google.checkStatus()} disabled={google.busy}>
+                {google.busy ? 'Checking…' : 'I finished in the popup — check status'}
+              </button>
+              <button className="btn btn-ghost" onClick={() => google.reset()}>Cancel</button>
+              {google.popupOpen && (
+                <span className="form-hint">A sign-in popup has been opened. Complete it to link your account.</span>
               )}
+              {!google.popupOpen && (
+                <span className="form-hint">If the popup did not open, allow popups for this site and reopen sign-in.</span>
+              )}
+            </div>
+          )}
+
+          {google.notice && <div className="status-msg info" role="status">{google.notice}</div>}
+          {google.error && <div className="status-msg error" role="alert">{google.error}</div>}
 
               {activeFactor === 'sms' && (
                 <div className="form-field">

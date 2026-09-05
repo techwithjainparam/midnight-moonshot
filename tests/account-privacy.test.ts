@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 
 import { InMemoryAccountStore } from '../server/account/store';
 import { AccountService } from '../server/account/service';
+import { configuredProviders } from './helpers/account-service-testing';
 import {
   rejectIdentityEvidence,
   EVIDENCE_MAX_LOCATION_AGE_MS,
@@ -46,9 +47,7 @@ test('stored server record contains no raw PII or plaintext password', () => {
     store: new InMemoryAccountStore(),
     encryptionSecret: ENC,
     otp: { hashSecret: 'privacy-otp-secret' },
-    smsDelivery: { configured: true, send: () => undefined },
-    whatsappDelivery: { configured: true, send: () => undefined },
-    googleAuthenticator: { configured: true, complete: () => true },
+    ...configuredProviders(),
   });
   const r = service.register(validPayload());
   assert.equal(r.ok, true);
@@ -164,9 +163,7 @@ function evidenceService() {
     store: new InMemoryAccountStore(),
     encryptionSecret: ENC,
     otp: { hashSecret: 'privacy-otp-secret' },
-    smsDelivery: { configured: true, send: () => undefined },
-    whatsappDelivery: { configured: true, send: () => undefined },
-    googleAuthenticator: { configured: true, complete: () => true },
+    ...configuredProviders(),
   });
 }
 

@@ -12,11 +12,11 @@ import {
   verifySmsOtp,
   sendWhatsappOtp,
   verifyWhatsappOtp,
-  completeGoogle,
   fetchAccountCapabilities,
   fetchLoginState,
   fetchFaceVerificationState,
 } from '../auth/account-api';
+import { useGoogleSignIn } from '../auth/google-oauth';
 import { getAccount, isAccountFullyVerified } from '../auth/account-store';
 
 // PRIESTATE — Login authentication (Level 3 Part 5).
@@ -54,7 +54,6 @@ export default function LoginPage() {
   // Phase: 'check' | 'factors' | 'complete'.
   const [phase, setPhase] = useState<'check' | 'factors' | 'complete'>('check');
   const [password, setPassword] = useState('');
-  const [authCode, setAuthCode] = useState('');
   const [smsCode, setSmsCode] = useState('');
   const [whatsappCode, setWhatsappCode] = useState('');
   const [smsSentAt, setSmsSentAt] = useState<number | null>(null);
@@ -212,22 +211,27 @@ export default function LoginPage() {
     }
   }, [address, whatsappCode, refreshLogin, login, advancePhase]);
 
-  const handleGoogleComplete = useCallback(async () => {
+  // Google factor (real OAuth popup flow, J.4). Linking is server-authoritative:
+  // the account is marked verified only after a server-side verified redirect.
+  const handleGoogleLinked = useCallback(async () => {
     if (!address) return;
     setFactorError(null);
     setBusyFactor('google');
     try {
-      const r = await completeGoogle(address, authCode);
-      if (r.ok) {
-        await refreshLogin();
-        advancePhase(login);
-      } else {
-        setFactorError(`Google: ${factorMsg(r.reason, r.message)}`);
+      const r = await fetchLoginState(address);
+      if (!r.ok || !r.data.exists) {
+        setFactorError('Could not re-check your login state after linking Google.');
+        return;
       }
+      setExists(r.data.exists);
+      setLogin(r.data.login);
+      setPhase(isLoginReady(r.data.login) ? 'complete' : 'factors');
     } finally {
       setBusyFactor(null);
     }
-  }, [address, authCode, refreshLogin, login, advancePhase]);
+  }, [address]);
+
+  const google = useGoogleSignIn(address, handleGoogleLinked);
 
   const handleLogin = useCallback(async () => {
     if (!address) return;
@@ -339,26 +343,38 @@ export default function LoginPage() {
           <section className="account-section">
             <h2 className="account-section-title">Google (required)</h2>
             <p className="account-section-desc">
-              Sign in with Google via the real OAuth exchange on the server.
+              Sign in with Google via the real OAuth exchange on the server. A
+              popup opens to complete the sign-in; the authorization code is
+              exchanged and verified entirely server-side and never handled by
+              this browser.
             </p>
-            <div className="form-field">
-              <input
-                type="text"
-                autoComplete="off"
-                className="form-input"
-                placeholder="Authorization code from the Google authenticator"
-                value={authCode}
-                disabled={!canFactor('google')}
-                onChange={(e) => setAuthCode(e.target.value)}
-              />
-            </div>
-            <button
-              className="btn btn-primary"
-              onClick={() => void handleGoogleComplete()}
-              disabled={!canFactor('google') || !authCode}
-            >
-              Link Google
-            </button>
+            {!google.challenge ? (
+              <button
+                className="btn btn-primary"
+                onClick={() => void google.begin()}
+                disabled={!canFactor('google') || google.busy}
+              >
+                {!canFactor('google') ? 'Google unavailable on server' : google.busy ? 'Starting…' : 'Sign in with Google'}
+              </button>
+            ) : (
+              <div className="form-field">
+                <button className="btn btn-primary" onClick={() => void google.begin()} disabled={google.busy}>
+                  Reopen Google sign-in
+                </button>
+                <button className="btn btn-ghost" onClick={() => void google.checkStatus()} disabled={google.busy}>
+                  {google.busy ? 'Checking…' : 'I finished in the popup — check status'}
+                </button>
+                <button className="btn btn-ghost" onClick={() => google.reset()}>Cancel</button>
+                {google.popupOpen && (
+                  <span className="form-hint">A sign-in popup has been opened. Complete it to link your account.</span>
+                )}
+                {!google.popupOpen && (
+                  <span className="form-hint">If the popup did not open, allow popups for this site and reopen sign-in.</span>
+                )}
+              </div>
+            )}
+            {google.notice && <div className="status-msg info" role="status">{google.notice}</div>}
+            {google.error && <div className="status-msg error" role="alert">{google.error}</div>}
             {!canFactor('google') && (
               <span className="form-hint">Google login is not configured on the verification server in this demo.</span>
             )}

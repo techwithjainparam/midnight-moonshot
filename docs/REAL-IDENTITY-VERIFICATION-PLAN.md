@@ -24,7 +24,7 @@ These genuinely perform their claimed operation; none is a mock.
 10. **Liveness engine — in-memory motion + frame-quality (REAL but limited).** `server/.../src/liveness/vision-provider.ts`, `state-machine.ts`, `camera-capture.ts`. Genuinely: captures a downsample grey grid, computes frame-to-frame motion + brightness/contrast quality, drives a pure randomized motion-challenge state machine. Camera permission is explicit; tracks are stopped; raw pixels are not retained. `biometricActions`/`faceDetection` advertise `false` and are never faked.
 11. **Face-verification provider boundary + state machine (REAL architecture).** `src/liveness/face-verification.ts` (`FaceVerificationProvider`, `IN_MEMORY_FACE_PROVIDER` fail-closed), `src/liveness/login-face-machine.ts` (no event sets `matched=true` directly; absent capability/reference ⇒ `verification_unavailable`).
 12. **Privacy invariants enforced by tests.** `tests/account-privacy.test.ts` guards no raw PII / password / selfie / biometric persistence and no on-chain payload text.
-13. **Google OAuth session security primitives (REAL).** `server/account/google-provider.ts` — cryptographically random per-wallet `state` + `nonce`, TTL (10 min), single-use, replay-rejected, `safeEqual` nonce check, code consumed before exchange. Credentials only from server env vars.
+13. **Google OAuth — REAL security primitives + server verification (J.4).** `server/account/google-provider.ts` — cryptographically random per-wallet `state` + `nonce` + PKCE(S256) `code_verifier`, TTL (10 min), single-use, replay-rejected on both the callback and the complete path, constant-time `safeEqual` nonce check. `server/lib/identity-provider-oidc.ts` cryptographically verifies the ID token (`iss`/`aud`/`exp`/`nonce` + JWKS signature via `jose`) and cross-checks the userinfo `sub`. A failed exchange can never fabricate success, and `complete()` requires the server-set `redirectVerified` flag that only a successfully verified OAuth redirect produces. Credentials only from server env vars; browser never sees a code.
 
 ---
 
@@ -40,11 +40,11 @@ These are explicitly labeled demo in the repository README and/or source. They e
 
 ## C. CURRENTLY PROVIDER-READY
 
-Real architectural boundary exists and the service fails closed today; a live external integration is the missing piece.
+Real architectural boundary exists, the transports are implemented and tested, and the service fails closed today; **live external credentials** are the only missing piece.
 
-1. **SMS OTP delivery.** `smsDelivery` in `service.ts`; `config.account.smsConfigured = SMS_GATEWAY_PROVIDER !== ''`. Real now: issue/verify, hashing, TTL, single-use, cooldown, rate limit. Missing: a real SMS gateway transport + credentials → feature currently `unavailable`.
-2. **WhatsApp OTP delivery.** Same pattern (`whatsappDelivery`, `WHATSAPP_GATEWAY_API_TOKEN`). Missing: real WhatsApp Business API/Cloud API transport + credentials.
-3. **Google OAuth exchange.** `GoogleProvider` boundary + state/nonce/`google/begin`-`complete` routes exist. Missing: real Google Cloud OAuth client (ID + secret) with correctly configured redirect/authorized origins, plus a real `exchange` that calls Google's token/userinfo endpoints and validates issuer/audience. Currently `googleConfigured=false` ⇒ unavailable.
+1. **SMS OTP delivery.** REAL transports since J.4: `server/account/sms-provider.ts` ships working **Twilio Messages API** (`TwilioSmsProvider`) and **generic HTTP gateway** (`GenericHttpSmsProvider`) adapters that POST real HTTPS requests (exact URL/auth/body asserted in `tests/transport-adapters.test.ts`). `AccountService.issueSmsOtp` now does a **two-phase commit**: limits/cooldown are checked *before* the real async `send()`, and the code (HMAC-hashed at rest) is committed *only after* the gateway accepts delivery — an unreachable gateway can never mint an OTP. Missing: live gateway credentials (`SMS_GATEWAY_PROVIDER=twilio|generic-http` + `SMS_TWILIO_*` / `SMS_HTTP_*`) → currently `unavailable`.
+2. **WhatsApp OTP delivery.** REAL transport since J.4: `server/account/whatsapp-provider.ts` (`MetaWhatsAppProvider`) POSTs the WhatsApp Business Cloud API `/<version>/<phone-number-id>/messages` JSON (asserted in `tests/transport-adapters.test.ts`), with the same two-phase commit OTP semantics as SMS. Missing: a live `WHATSAPP_GATEWAY_API_TOKEN` + `WHATSAPP_GATEWAY_PHONE_NUMBER_ID` → currently `unavailable`.
+3. **Google OAuth exchange.** REAL end-to-end since J.4: `server/account/google-provider.ts` + `server/lib/identity-provider-oidc.ts` implement a genuine OAuth2 authorization-code + PKCE(S256) + OIDC flow — the server callback route (`GET /api/v1/account/google/callback`) exchanges the code, cryptographically verifies the ID token (`iss`/`aud`/`exp`/`nonce` + **JWKS signature** via `jose` + userinfo `sub` cross-check), and only then marks the challenge `redirectVerified` so `complete()` can accept it. Real keypair/JWKS signature tests: `tests/google-oidc.test.ts`. Missing: a live Google Cloud OAuth client (`GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`/`GOOGLE_REDIRECT_URI`) → currently `unavailable`.
 4. **Aadhaar-linked KYC (mobile-link check).** `server/services/identity-provider.ts` — a genuine HTTP adapter with both a **direct link-check** mode and a **challenge/submit** OTP mode, fails closed on ambiguous responses. Missing: authorized vendor credentials (`AADHAAR_KYC_API_TOKEN`, `_BASE_URL`) and confirmation the vendor contract is available. Currently `available=false` and the UI reports "not available in this demo." Official UIDAI verification requires an authorized integration — do NOT claim it without one.
 5. **Login face verification (Part 6).** Provider boundary + fail-closed state machine + honest UI + server snapshot (`faceVerificationState` returns `providerAvailable:false, hasReferenceIdentity:false`). Missing: a real CV provider and a legitimate enrolled reference. Currently `provider_unavailable` by design.
 
@@ -57,10 +57,9 @@ Real architectural boundary exists and the service fails closed today; a live ex
 3. **Real live-face-vs-reference matching** — no embedding model, no comparison, no reference store.
 4. **Replay/photo/video-attack resistance** — no depth/silent-liveness/texture/iridescence checks; a static image or replayed video could satisfy the (motion-only) engine if it keeps moving. Real resistance is unimplemented.
 5. **Official Aadhaar identity verification** — not integrated with any authorized vendor; no real KYC call is currently made.
-6. **Live Google OAuth** — no real credential exchange.
-7. **Live SMS/WhatsApp delivery** — no real gateway calls.
-8. **Production backend deployment** — the Level 3 server is not confirmed deployed/reachable; only the frontend is live on Vercel.
-9. **Production operational hardening** (see §G for specifics).
+6. **Live Google OAuth / SMS / WhatsApp delivery** — the real transports, callback, and JWKS verification are implemented and tested (J.4), but **live third-party credentials are not shipped**: `GOOGLE_CLIENT_ID/SECRET`, `SMS_GATEWAY_PROVIDER`, `WHATSAPP_GATEWAY_API_TOKEN` are empty by default, so each factor honestly reports `unavailable` and never fabricates a success.
+7. **Production backend deployment** — the Level 3 server is not confirmed deployed/reachable; only the frontend is live on Vercel.
+8. **Production operational hardening** (see §G for specifics).
 
 ---
 
@@ -100,11 +99,13 @@ Goal: match the live camera face against the enrolled reference, fail closed.
 - **Tie to `/api/v1/account/login/face-verification`:** change `faceVerificationState` from a static `false/false` to reflect a real `providerAvailable` + per-account `hasReferenceIdentity`; add a server route that performs verification and returns only a verdict (never the raw embedding). The session gate must accept the server-computed `matched` only.
 - **Replace the login gate:** login must require a real server success from this route when a reference exists; when no reference exists, the system should fail closed (or require enrollment first) — never silently succeed.
 
-### E4. Real OAuth/OTP providers (Google / SMS / WhatsApp)
-- **Google (real OAuth):** create a Google Cloud OAuth 2.0 client; set `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` (server-only) and a real `exchange` that posts the auth code to `https://oauth2.googleapis.com/token`, validates `iss`, `aud`, `exp`, `nonce` from the ID token. Add a server `GET /api/v1/account/google/callback` OAuth redirect route (currently only `/begin` and `/complete` exist; there is no real redirect endpoint). Configure authorized redirect URI `https://<backend>/api/v1/account/google/callback` and the frontend origin.
-- **SMS:** wire `smsDelivery.send` to a real gateway (Twilio/Twilio Verify/MessageBird) with server-only credentials; keep hashing/TTL/single-use/cooldown/rate-limit in the OTP service (already correct).
-- **WhatsApp:** wire `whatsappDelivery.send` to WhatsApp Business/Cloud API with server-only credentials; keep same OTP guarantees.
-- **Never** expose these credentials through VITE/`VITE_*` public frontend variables.
+### E4. Real OAuth/OTP providers (Google / SMS / WhatsApp) — **IMPLEMENTED as of J.4**
+All code-side work in this section is **done and tested**; the only remaining step to go live is supplying credentials and (for Google) registering the redirect URI at the provider:
+
+- **Google (real OAuth) — implemented.** `GET /api/v1/account/google/callback` (a real OAuth redirect endpoint), a real code exchange via `OAuthHttp` to the token endpoint, and real ID-token validation via `jose`: `iss`, `aud`, `exp`, `nonce`, **JWKS signature**, plus a userinfo `sub` cross-check. Add a Google Cloud OAuth 2.0 Web client, set server-only `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI=https://<backend>/api/v1/account/google/callback`, and authorize that redirect URI + the frontend origin at the provider.
+- **SMS — implemented.** `server/account/sms-provider.ts` (Twilio + generic-http) is wired into a real two-phase OTP issue/verify with hashing/TTL/single-use/cooldown/rate-limit intact. Set `SMS_GATEWAY_PROVIDER=twilio` (+ `SMS_TWILIO_*`) or `generic-http` (+ `SMS_HTTP_URL` with `{to}`/`{code}` placeholders).
+- **WhatsApp — implemented.** `server/account/whatsapp-provider.ts` (WhatsApp Business Cloud API). Set `WHATSAPP_GATEWAY_API_TOKEN` + `WHATSAPP_GATEWAY_PHONE_NUMBER_ID`.
+- **Never** expose these credentials through VITE/`VITE_*` public frontend variables — all of the above are server-env-only (documented in `.env.example`).
 
 ### E5. Real identity/Aadhaar provider
 - **Authorize first:** obtain an actual authorized integration with a UIDAI KYC pipeline or an approved vendor (the adapter in `identity-provider.ts` already targets this). Do not claim official verification without it.
@@ -208,7 +209,7 @@ Continue the existing `node:test` pattern in `tests/`. Intended coverage:
 - Provide a `Procfile`/`start` command and a health/`/` route currently served by `server/index.ts`.
 
 **Server-only env (never VITE):**
-- `ACCOUNT_ENC_SECRET` (≥16 chars), `ACCOUNT_BIOMETRIC_ENC_SECRET` (≥32 chars), `OTP_HASH_SECRET` (≥16 chars), `REGISTRY_OFFICER_API_TOKEN`, `SMTP_*`/`EMAIL_FROM`, `SMS_GATEWAY_PROVIDER`, `WHATSAPP_GATEWAY_API_TOKEN`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `AADHAAR_KYC_PROVIDER`, `AADHAAR_KYC_API_TOKEN`, `AADHAAR_KYC_BASE_URL`, `AADHAAR_KYC_MOBILE_LINK_PATH`.
+- `ACCOUNT_ENC_SECRET` (≥16 chars), `ACCOUNT_BIOMETRIC_ENC_SECRET` (≥32 chars), `OTP_HASH_SECRET` (≥16 chars), `REGISTRY_OFFICER_API_TOKEN`, `SMTP_*`/`EMAIL_FROM`, `SMS_GATEWAY_PROVIDER` (+ `SMS_TWILIO_ACCOUNT_SID`/`SMS_TWILIO_AUTH_TOKEN`/`SMS_TWILIO_FROM` or `SMS_HTTP_URL`/`SMS_HTTP_TOKEN`/`SMS_HTTP_TIMEOUT_MS`, `SMS_TIMEOUT_MS`), `WHATSAPP_GATEWAY_API_TOKEN`, `WHATSAPP_GATEWAY_PHONE_NUMBER_ID` (+ optional `WHATSAPP_GATEWAY_BASE_URL`/`WHATSAPP_GATEWAY_API_VERSION`/`WHATSAPP_TIMEOUT_MS`), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` (+ optional `GOOGLE_OAUTH_ENABLED`/`GOOGLE_AUTH_ENDPOINT`/`GOOGLE_TOKEN_ENDPOINT`/`GOOGLE_USERINFO_ENDPOINT`/`GOOGLE_JWKS_ENDPOINT`/`GOOGLE_ISSUER`/`GOOGLE_OAUTH_TIMEOUT_MS`/`GOOGLE_STATE_TTL_MINUTES`), `AADHAAR_KYC_PROVIDER`, `AADHAAR_KYC_API_TOKEN`, `AADHAAR_KYC_BASE_URL`, `AADHAAR_KYC_MOBILE_LINK_PATH`.
 
 **Frontend-only (public, non-secret):**
 - `VITE_VERIFICATION_API_URL` — the backend's **public** HTTPS URL.
@@ -223,7 +224,7 @@ Continue the existing `node:test` pattern in `tests/`. Intended coverage:
 1. **Real registration liveness** — add a real face-detection + landmark engine server-side (or a well-selected on-device model feeding a server verdict), re-enable the existing blink/head-pose challenges, add a face-quality gate, and add replay/photo resistance. Verify with liveness tests (H1–H6).
 2. **Secure biometric reference enrollment** — server-side encrypted embedding store, distinct key, consent/revoke/delete, not-on-ledger. Verify with H7–H10.
 3. **Real login face matching** — server-side live-face-vs-reference, tie to `/api/v1/account/login/face-verification`, keep fail-closed, prove match/mismatch/none. Verify with H11–H15.
-4. **Real OAuth/OTP providers** — Google OAuth real redirect + token validation; SMS + WhatsApp real transports; keep all OTP guarantees. Verify with H17–H27.
+4. **Real OAuth/OTP providers** — **DONE (J.4):** Google OAuth real redirect + callback + JWKS token validation, plus real SMS (Twilio/generic-http) and WhatsApp Cloud API transports, all verified with H17–H27 (incl. `tests/google-oidc.test.ts`, `tests/transport-adapters.test.ts`). Remaining: supply live credentials; re-verify over a live gateway.
 5. **Real identity/Aadhaar provider** — obtain and wire an authorized KYC integration; make `identityVerified` depend on a real server-computed success (replace the bare `confirmed:true`). Verify with privacy + identity determinism.
 6. **Backend production deployment** — TLS server, server-only env, stable data store, CORS to live frontend; confirm the live Level 3 flows are reachable, not just the frontend.
 7. **Final documentation/evidence** — update README status truthfully, add test screenshot + Level 3 demo video, update the product proposal to match the now-real features.
@@ -238,7 +239,7 @@ Cross-cutting: extend privacy-invariant tests and security tests continuously; d
 - **The biggest demo gap:** `/api/v1/account/identity-verified` accepts a bare `confirmed:true` with no real server-computed evidence — this is the single point that lets a login be marked identity-verified without a real identity check. It must be replaced by a real server-authorized identity proof (face OR KYC).
 - **Liveness is motion-only, not facial liveness:** no face detection/landmarks/blink/head-pose; the honest engine correctly fails closed rather than faking them.
 - **No biometric reference exists; no storage, no match path.**
-- **Google/SMS/WhatsApp/Aadhaar are genuine provider boundaries that fail closed,** requiring live credentials + (for Google) a real redirect callback route.
+- **Google/SMS/WhatsApp are genuine provider boundaries that fail closed.** Since J.4 the **real transports and server verification are implemented and tested** (Twilio/generic-http/WhatsApp Cloud API adapters, a real OAuth2 callback route, OIDC JWKS signature + nonce checks); only **live third-party credentials** are absent, so each factor honestly reports `unavailable` today.
 - **Backend is not confirmed deployed**; only the frontend is live.
 - **In-memory OTP/challenge/rate-limit state** should move to persistent storage for production hardening.
 
@@ -343,3 +344,46 @@ This section records what Part 7 actually built and, equally, what it does NOT c
 - `npm run build` — clean.
 - `account-privacy.test.ts` still asserts the server never logs/returns secrets/tokens and never stores raw biometrics (only encrypted ciphertext + metadata); the Part 8 fingerprint sweep is preserved.
 - Midnight Compact contract, wallet, and deployed state **untouched**; no secrets/PII/biometric/location data introduced. Nothing committed or pushed.
+
+---
+
+## Part J.4 — Real Google OAuth + real SMS/WhatsApp OTP delivery (LOG)
+
+This section records the J.4 implementation: REAL provider code paths (outbound HTTPS transports, OIDC/JWKS verification, real callback route) that remain fail-closed (`unavailable`) until live credentials are supplied.
+
+### J.1 What changed (real code paths, server-side)
+
+**Google OAuth — a real OAuth2 authorization-code + PKCE(S256) + OIDC flow:**
+- `GET /api/v1/account/google/callback` (unauthenticated, popup/top-level navigation) exchanges the code over HTTPS, verifies the ID token via `jose` (iss/aud/exp/**nonce** + **JWKS signature** from the remote JWKS), cross-checks the profile `sub` at the userinfo endpoint, then 302s to the app with `?google=pending`. Codes/tokens/states are never logged.
+- `complete({ state, nonce })` (authenticated) finalizes ONLY when the challenge carries the new server-set **`redirectVerified`** flag — a challenge can never be fabricated, and a replay of the same challenge is rejected on both paths (`oauth-state.ts`).
+- The browser **never sends or sees an authorization code**: the frontend now runs a popup flow (`src/auth/google-oauth.ts` hook) — begin → open the real `authUrl` popup → the popup announces on the `?google=pending` landing → the opener calls complete with the in-memory state+nonce. No localStorage, no URL nonces, no VITE exposure.
+
+**SMS — real transports with two-phase OTP commit:**
+- `TwilioSmsProvider` (Messages REST API, Basic auth) and `GenericHttpSmsProvider` (`{to}`/`{code}` URL template) POST real HTTPS requests (exact URL/headers/body asserted in `tests/transport-adapters.test.ts`).
+- `OtpService.issue*` is async and **two-phase**: rate/cooldown limits are evaluated *before* the real `provider.send()`, and the OTP is committed (HMAC-hashed at rest) only after the gateway **accepts** delivery. A failed/absent gateway → `delivery-failed`/`unavailable`, no code minted, no budget burned.
+
+**WhatsApp — real transport:**
+- `MetaWhatsAppProvider` POSTs the WhatsApp Business Cloud API `/<version>/<phone-number-id>/messages` with Bearer auth and a JSON payload (asserted in tests), with the same two-phase commit semantics.
+
+### J.2 Security controls preserved / added
+- `redirectVerified`: only a server-verified redirect sets it; `googleComplete` returns `unauthorized` otherwise. Callback replay and complete replay both fail closed. Consumed challenges are removed.
+- Codes are stored only as HMAC-SHA256; raw codes, tokens, secrets, and nonces are never logged, never in URLs, never in localStorage/VITE.
+- Google factor order preserved (Wallet → Google → SMS → WhatsApp); unconfigured factors remain `unavailable` (fail closed).
+- Server-only dependency `jose` (v6.2.11) is imported only by server modules — never bundled into the browser.
+
+### J.3 Frontend changes
+- `src/auth/account-api.ts`: removed the code-based `completeGoogle`; `completeGoogleWithState` now takes `{ state, nonce }` only.
+- `src/auth/google-oauth.ts` (new): `useGoogleSignIn` hook + popup-landing announcement; challenge held in component memory only.
+- `src/pages/LoginPage.tsx` / `src/pages/UserRegistrationPage.tsx`: replaced the manual “authorization code” input with the popup flow and honest `unavailable`/error surfacing.
+- `src/App.tsx`: boot-time popup-landing handler so completion works from any route.
+
+### J.4 Tests added
+- `tests/google-oidc.test.ts` — REAL keypair + JWKS + `jose`: valid RS256/ES256 tokens verify; tampered payloads, attacker keys, wrong issuer/audience, expiry, wrong nonce, and HS256 forgery are all rejected; a full provider begin → verified-redirect → complete flow (server signature check) proves single-use and that an unverified redirect can never be completed.
+- `tests/transport-adapters.test.ts` — Twilio / generic-http / WhatsApp adapters against a stubbed `fetch`: exact URLs, auth headers, form/JSON bodies, accepted/rejected status handling, network-error fail-closed, and factory fail-closed guards.
+
+### J.5 Verification status (Part J.4)
+- `npm test` — full suite **393 pass / 0 fail** (370 after the Part 8 test migration + 23 new J.4 OIDC/transport tests).
+- `npm run typecheck` — clean (`tsc --noEmit`).
+- `npm run build` — clean; the `jose` dependency is never bundled into the client.
+- Real vs PROVIDER-READY vs NOT-AVAILABLE: the Google flow and the SMS/WhatsApp transports are **REAL/PROVIDER-READY** — fully implemented and tested; they report `unavailable` (fail closed) only because live third-party credentials are not shipped. NOT-AVAILABLE blobs (real CV / official Aadhaar KYC) were not touched.
+- Midnight Compact contract, wallet, and deployed state **untouched**; no new secrets, PII, or biometric/location data introduced. Nothing committed or pushed.

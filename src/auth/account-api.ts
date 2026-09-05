@@ -102,11 +102,7 @@ export function verifyWhatsappOtp(walletAddress: string, code: string): Promise<
   return api('/v1/account/otp-whatsapp/verify', { walletAddress, code });
 }
 
-export function completeGoogle(walletAddress: string, authCode: string): Promise<AccountApiResult<{ account: PublicAccountView }>> {
-  return api('/v1/account/google/complete', { walletAddress, authCode });
-}
-
-/** Begin a secure Google sign-in, returning the state + nonce challenge. */
+/** Begin a secure Google sign-in, returning the state + nonce challenge + real OAuth URL. */
 export function beginGoogle(walletAddress: string): Promise<
   AccountApiResult<{ ok: true; state: string; nonce: string; authUrl: string }>
 > {
@@ -115,13 +111,16 @@ export function beginGoogle(walletAddress: string): Promise<
 
 /**
  * Complete a secure Google sign-in with the challenge state + nonce. The
- * nonce is echoed back from the in-app client — never placed in a URL.
+ * client NEVER sends an authorization code: the code is exchanged and
+ * verified entirely server-side at the callback route. The nonce is echoed
+ * back from the in-app client — never placed in a URL or persisted locally.
+ * The server only accepts a challenge that survived a verified OAuth redirect.
  */
 export function completeGoogleWithState(
   walletAddress: string,
-  params: { state: string; nonce: string; code: string },
+  params: { state: string; nonce: string },
 ): Promise<AccountApiResult<{ account: PublicAccountView }>> {
-  return api('/v1/account/google/complete', { ...params, authCode: params.code, walletAddress });
+  return api('/v1/account/google/complete', { ...params, walletAddress });
 }
 
 export interface AccountExistence {

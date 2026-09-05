@@ -67,6 +67,24 @@ export interface ServerConfig {
     readonly whatsappConfigured: boolean;
     /** True when a real Google OAuth client is configured (else unavailable). */
     readonly googleConfigured: boolean;
+    /** Real SMS gateway adapter settings (J.4). */
+    readonly sms?: import('./account/sms-provider').SmsProviderConfig;
+    /** Real WhatsApp Cloud API adapter settings (J.4). */
+    readonly whatsapp?: import('./account/whatsapp-provider').WhatsAppProviderConfig;
+    /** Real Google OAuth2 settings (J.4). */
+    readonly googleOauth?: {
+      readonly enabled: boolean;
+      readonly clientId: string;
+      readonly clientSecret: string;
+      readonly redirectUri: string;
+      readonly oauthAuthorizeEndpoint?: string;
+      readonly oauthTokenEndpoint?: string;
+      readonly oauthUserinfoEndpoint?: string;
+      readonly jwksUri?: string;
+      readonly issuer?: string;
+      readonly timeoutMs: number;
+      readonly stateTtlMs?: number;
+    };
     /** Session cookie TTL in ms (default 24h). */
     readonly sessionTtlMs: number;
     /** Whether to set the Secure flag on session cookies (default true). */
@@ -122,6 +140,49 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       smsConfigured: env.SMS_GATEWAY_PROVIDER?.trim() !== '',
       whatsappConfigured: env.WHATSAPP_GATEWAY_API_TOKEN?.trim() !== '',
       googleConfigured: env.GOOGLE_CLIENT_ID?.trim() !== '' && env.GOOGLE_CLIENT_SECRET?.trim() !== '',
+      sms: {
+        provider: env.SMS_GATEWAY_PROVIDER?.trim() ?? '',
+        twilio:
+          env.SMS_GATEWAY_PROVIDER?.trim() === 'twilio'
+            ? {
+                accountSid: env.SMS_TWILIO_ACCOUNT_SID?.trim() ?? '',
+                authToken: env.SMS_TWILIO_AUTH_TOKEN ?? '',
+                fromNumber: env.SMS_TWILIO_FROM?.trim() ?? '',
+              }
+            : undefined,
+        genericHttp:
+          env.SMS_GATEWAY_PROVIDER?.trim() === 'generic-http'
+            ? {
+                url: env.SMS_HTTP_URL?.trim() ?? '',
+                token: env.SMS_HTTP_TOKEN ?? '',
+                timeoutMs: intEnv('SMS_HTTP_TIMEOUT_MS', 10000),
+              }
+            : undefined,
+        timeoutMs: intEnv('SMS_TIMEOUT_MS', 10000),
+      },
+      whatsapp: {
+        apiToken: env.WHATSAPP_GATEWAY_API_TOKEN?.trim() ?? '',
+        phoneNumberId: env.WHATSAPP_GATEWAY_PHONE_NUMBER_ID?.trim() ?? '',
+        baseUrl: env.WHATSAPP_GATEWAY_BASE_URL?.trim() || undefined,
+        apiVersion: env.WHATSAPP_GATEWAY_API_VERSION?.trim() || undefined,
+        timeoutMs: intEnv('WHATSAPP_TIMEOUT_MS', 10000),
+      },
+      googleOauth: {
+        enabled: env.GOOGLE_OAUTH_ENABLED?.trim() !== 'false',
+        clientId: env.GOOGLE_CLIENT_ID?.trim() ?? '',
+        clientSecret: env.GOOGLE_CLIENT_SECRET ?? '',
+        redirectUri: env.GOOGLE_REDIRECT_URI?.trim() ?? '',
+        oauthAuthorizeEndpoint:
+          env.GOOGLE_AUTH_ENDPOINT?.trim() || 'https://accounts.google.com/o/oauth2/v2/auth',
+        oauthTokenEndpoint:
+          env.GOOGLE_TOKEN_ENDPOINT?.trim() || 'https://oauth2.googleapis.com/token',
+        oauthUserinfoEndpoint:
+          env.GOOGLE_USERINFO_ENDPOINT?.trim() || 'https://openidconnect.googleapis.com/v1/userinfo',
+        jwksUri: env.GOOGLE_JWKS_ENDPOINT?.trim() || 'https://www.googleapis.com/oauth2/v3/certs',
+        issuer: env.GOOGLE_ISSUER?.trim() || 'https://accounts.google.com',
+        timeoutMs: intEnv('GOOGLE_OAUTH_TIMEOUT_MS', 8000),
+        stateTtlMs: intEnv('GOOGLE_STATE_TTL_MINUTES', 10) * 60 * 1000,
+      },
       sessionTtlMs: intEnv('ACCOUNT_SESSION_TTL_HOURS', 24) * 60 * 60 * 1000,
       sessionSecure: env.ACCOUNT_SESSION_SECURE !== 'false',
     },

@@ -30,6 +30,10 @@ import type { ServerConfig } from '../server/config';
 import { listenVerificationServer } from '../server/index';
 import { applySchema } from '../server/account/db';
 import { AccountService } from '../server/account/service';
+import type { VerificationServerOverrides } from '../server/index';
+import { configuredProviders } from './helpers/account-service-testing';
+import { createGoogleTestKit, type GoogleTestKit } from './helpers/google-oauth-kit';
+import type { SmsSendResult, WhatsAppSendResult } from './helpers/provider-types';
 import { InMemoryAccountStore } from '../server/account/store';
 import { hashPassword } from '../server/account/security';
 import { type AccountRecord } from '../server/account/model';
@@ -106,9 +110,7 @@ function makeService(store: InMemoryAccountStore): AccountService {
     store,
     otp: { hashSecret: 'face-test-otp-hash-secret' },
     encryptionSecret: 'face-test-enc-secret-secret',
-    smsDelivery: { configured: true, send: () => undefined },
-    whatsappDelivery: { configured: true, send: () => undefined },
-    googleAuthenticator: { configured: true, complete: () => true },
+    ...configuredProviders(),
   });
 }
 
@@ -331,22 +333,27 @@ test('D2: faceVerificationState is fail-closed and null for unknown wallets', ()
 
 // ── E. HTTP-level: capabilities + face-verification endpoint ─────────
 
-interface TestEnv {
-  dir: string;
-  overrides: Record<string, unknown>;
-}
-
-function makeHttpOverrides(): TestEnv {
+function makeHttpOverrides(): { dir: string; kit: GoogleTestKit; overrides: VerificationServerOverrides } {
   const dir = mkdtempSync(path.join(tmpdir(), 'priestate-face-'));
   const db = new Database(path.join(dir, 'test.db'));
   applySchema(db);
+  const kit = createGoogleTestKit();
   return {
     dir,
+    kit,
     overrides: {
       db,
-      accountSmsDelivery: { configured: true, send: () => undefined },
-      accountWhatsappDelivery: { configured: true, send: () => undefined },
-      accountGoogleAuthenticator: { configured: true, complete: () => true },
+      accountSmsProvider: {
+        name: 'capture',
+        configured: true,
+        send: async (): Promise<SmsSendResult> => ({ ok: true }),
+      },
+      accountWhatsAppProvider: {
+        name: 'capture',
+        configured: true,
+        send: async (): Promise<WhatsAppSendResult> => ({ ok: true }),
+      },
+      accountGoogleProvider: kit.provider,
     },
   };
 }

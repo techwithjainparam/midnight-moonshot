@@ -44,6 +44,7 @@
     "@vladmandic/face-api": "^1.7.15",
     "better-sqlite3": "^13.0.3",
     "buffer": "^6.0.3",
+    "jose": "^6.2.11",
     "nodemailer": "^9.0.5",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

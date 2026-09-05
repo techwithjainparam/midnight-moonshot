@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { AccountService } from '../server/account/service';
 import { InMemoryAccountStore } from '../server/account/store';
 import { enrollmentVectors } from './biometric-vectors';
+import { createGoogleTestKit, type GoogleTestKit } from './helpers/google-oauth-kit';
 
 const ENC = 'level3-auth-test-enc-secret';
 
@@ -26,24 +27,33 @@ function makeService(over: {
   google?: boolean;
   googleAccept?: boolean;
   capture?: Capture;
-} = {}): { service: AccountService; capture: Capture } {
+} = {}): { service: AccountService; capture: Capture; kit: GoogleTestKit } {
   const capture: Capture = { sms: [], whatsapp: [] };
+  const kit = createGoogleTestKit({ accept: over.googleAccept ?? true });
   const service = new AccountService({
     store: new InMemoryAccountStore(),
     encryptionSecret: ENC,
     biometricEncryptionSecret: ENC,
     otp: { hashSecret: 'auth-test-otp-secret' },
-    smsDelivery: {
+    smsProvider: {
+      name: 'capture',
       configured: over.sms ?? true,
-      send: (to, code) => { capture.sms.push(`${to}:${code}`); },
+      send: async (to, code) => {
+        capture.sms.push(`${to}:${code}`);
+        return { ok: true };
+      },
     },
-    whatsappDelivery: {
+    whatsAppProvider: {
+      name: 'capture',
       configured: over.whatsapp ?? true,
-      send: (to, code) => { capture.whatsapp.push(`${to}:${code}`); },
+      send: async (to, code) => {
+        capture.whatsapp.push(`${to}:${code}`);
+        return { ok: true };
+      },
     },
-    googleAuthenticator: { configured: over.google ?? true, complete: () => over.googleAccept ?? true },
+    googleProvider: kit.provider,
   });
-  return { service, capture };
+  return { service, capture, kit };
 }
 
 const WALLET = '0x' + 'b'.repeat(64);
@@ -62,19 +72,24 @@ function payload() {
   };
 }
 
-function fullyVerify(service: AccountService, capture: Capture): void {
+async function fullyVerify(
+  service: AccountService,
+  capture: Capture,
+  kit: GoogleTestKit,
+): Promise<void> {
   // Register → SMS OTP → WhatsApp OTP → Google → identity.
   const regRes = service.register(payload());
   assert.equal(regRes.ok, true);
-  const smsIssue = service.issueSmsOtp(WALLET);
+  const smsIssue = await service.issueSmsOtp(WALLET);
   assert.equal(smsIssue.ok, true);
   const smsCode = lastCode(capture.sms);
   assert.equal(service.verifySmsOtp(WALLET, smsCode).ok, true);
-  const waIssue = service.issueWhatsappOtp(WALLET);
+  const waIssue = await service.issueWhatsappOtp(WALLET);
   assert.equal(waIssue.ok, true);
   const waCode = lastCode(capture.whatsapp);
   assert.equal(service.verifyWhatsappOtp(WALLET, waCode).ok, true);
-  assert.equal('view' in service.completeGoogle(WALLET, 'code') && service.completeGoogle(WALLET, 'code').ok, true);
+  const linked = await kit.link(service, WALLET);
+  assert.equal(linked.ok, true);
   fullyEnroll(service);
 }
 
@@ -113,14 +128,14 @@ test('same wallet cannot register twice', () => {
   if ('reason' in second) assert.equal(second.reason, 'already-registered');
 });
 
-test('login is blocked when any single factor is missing', () => {
+test('login is blocked when any single factor is missing', async () => {
   // Complete SMS + Google + identity, but leave WhatsApp pending.
-  const { service, capture } = makeService();
+  const { service, capture, kit } = makeService();
   assert.equal(service.register(payload()).ok, true);
-  const issue = service.issueSmsOtp(WALLET);
+  const issue = await service.issueSmsOtp(WALLET);
   assert.equal(issue.ok, true);
   assert.equal(service.verifySmsOtp(WALLET, lastCode(capture.sms)).ok, true);
-  assert.equal('view' in service.completeGoogle(WALLET, 'code') && service.completeGoogle(WALLET, 'code').ok, true);
+  assert.equal((await kit.link(service, WALLET)).ok, true);
   fullyEnroll(service);
 
   // Correct password but WhatsApp pending => blocked as a missing factor.
@@ -129,18 +144,18 @@ test('login is blocked when any single factor is missing', () => {
   if ('reason' in blocked) assert.equal(blocked.reason, 'factor-missing');
 });
 
-test('identity verification is independently enforced at login', () => {
-  const { service, capture } = makeService();
-  fullyVerify(service, capture);
+test('identity verification is independently enforced at login', async () => {
+  const { service, capture, kit } = makeService();
+  await fullyVerify(service, capture, kit);
   // Invalid password => unauthorized.
   const bad = service.login({ walletAddress: WALLET, password: 'Wrong!Pass' });
   assert.equal(bad.ok, false);
   if ('reason' in bad) assert.equal(bad.reason, 'unauthorized');
 });
 
-test('a fully-verified account logs in successfully with all factors', () => {
-  const { service, capture } = makeService();
-  fullyVerify(service, capture);
+test('a fully-verified account logs in successfully with all factors', async () => {
+  const { service, capture, kit } = makeService();
+  await fullyVerify(service, capture, kit);
   const good = service.login({ walletAddress: WALLET, password: 'V3ry#Secret' });
   assert.equal(good.ok, true);
   if (good.ok && 'session' in good) assert.ok(good.session.accountId.length > 0);
@@ -153,10 +168,10 @@ test('unknown wallet cannot log in', () => {
   if ('reason' in r) assert.equal(r.reason, 'not-found');
 });
 
-test('OTP is single-use: a consumed code cannot be reused', () => {
+test('OTP is single-use: a consumed code cannot be reused', async () => {
   const { service, capture } = makeService();
   assert.equal(service.register(payload()).ok, true);
-  assert.equal(service.issueSmsOtp(WALLET).ok, true);
+  assert.equal((await service.issueSmsOtp(WALLET)).ok, true);
   const code = lastCode(capture.sms);
   assert.equal(service.verifySmsOtp(WALLET, code).ok, true);
   // Reusing the same code now fails.
@@ -164,10 +179,10 @@ test('OTP is single-use: a consumed code cannot be reused', () => {
   assert.equal(reusable.ok, false);
 });
 
-test('raw OTP codes are never returned to the client, only delivered', () => {
+test('raw OTP codes are never returned to the client, only delivered', async () => {
   const { service, capture } = makeService();
   assert.equal(service.register(payload()).ok, true);
-  const issue = service.issueSmsOtp(WALLET);
+  const issue = await service.issueSmsOtp(WALLET);
   assert.equal(issue.ok, true);
   // The issue response itself carries the code ONLY to the send hook.
   assert.ok(capture.sms.length === 1);

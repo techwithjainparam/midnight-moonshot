@@ -28,7 +28,9 @@ import { deriveLoginState } from '../server/account/login-state';
 import { AccountService } from '../server/account/service';
 import { InMemoryAccountStore } from '../server/account/store';
 import { GOOGLE_STATE_TTL_MS } from '../server/account/google-provider';
+import type { SmsSendResult, WhatsAppSendResult } from './helpers/provider-types';
 import { enrollmentVectors } from './biometric-vectors';
+import { createGoogleTestKit, type GoogleTestKit } from './helpers/google-oauth-kit';
 
 const ENC = 'login-auth-enc-secret';
 const HASH = 'login-auth-otp-hash-secret-0123456789';
@@ -88,15 +90,25 @@ function makeOverrides() {
   const db = new Database(path.join(dir, 'test.db'));
   applySchema(db);
   const capture: Capture = { sms: [], whatsapp: [] };
+  const kit = createGoogleTestKit();
   return {
     dir,
     db,
     capture,
+    kit,
     overrides: {
       db,
-      accountSmsDelivery: { configured: true, send: (to: string, code: string) => { capture.sms.push({ to, code }); } },
-      accountWhatsappDelivery: { configured: true, send: (to: string, code: string) => { capture.whatsapp.push({ to, code }); } },
-      accountGoogleAuthenticator: { configured: true, complete: () => true },
+      accountSmsProvider: {
+        name: 'capture',
+        configured: true,
+        send: async (to: string, code: string): Promise<SmsSendResult> => { capture.sms.push({ to, code }); return { ok: true }; },
+      },
+      accountWhatsAppProvider: {
+        name: 'capture',
+        configured: true,
+        send: async (to: string, code: string): Promise<WhatsAppSendResult> => { capture.whatsapp.push({ to, code }); return { ok: true }; },
+      },
+      accountGoogleProvider: kit.provider,
     },
   };
 }
@@ -109,17 +121,26 @@ function makeLoginService() {
   let now = 1_000_000;
   const clock = { get now(): number { return now; }, advance(ms: number): void { now += ms; } };
   const delivered: Capture = { sms: [], whatsapp: [] };
+  const kit = createGoogleTestKit({ now: () => now });
   const service = new AccountService({
     store: new InMemoryAccountStore(),
     encryptionSecret: ENC,
     biometricEncryptionSecret: ENC,
     otp: { hashSecret: HASH, smsTtlMs: 5 * 60 * 1000, whatsappTtlMs: 10 * 60 * 1000 },
-    smsDelivery: { configured: true, send: (to, code) => { delivered.sms.push({ to, code }); } },
-    whatsappDelivery: { configured: true, send: (to, code) => { delivered.whatsapp.push({ to, code }); } },
-    googleAuthenticator: { configured: true, complete: () => true },
+    smsProvider: {
+      name: 'capture',
+      configured: true,
+      send: async (to, code): Promise<SmsSendResult> => { delivered.sms.push({ to, code }); return { ok: true }; },
+    },
+    whatsAppProvider: {
+      name: 'capture',
+      configured: true,
+      send: async (to, code): Promise<WhatsAppSendResult> => { delivered.whatsapp.push({ to, code }); return { ok: true }; },
+    },
+    googleProvider: kit.provider,
     now: () => now,
   });
-  return { service, delivered, clock };
+  return { service, delivered, clock, kit };
 }
 
 function lastDeliveredCode(delivered: Capture, channel: 'sms' | 'whatsapp'): string {
@@ -147,7 +168,7 @@ function cookieValue(setCookie: string | null | undefined): string | null {
 }
 
 /** Register a wallet and drive all login factors to verified on the server. */
-async function fullyRegistered(base: string, env: { capture: Capture }, wallet = WALLET) {
+async function fullyRegistered(base: string, env: { capture: Capture; kit: GoogleTestKit }, wallet = WALLET) {
   const reg = await resp(base, '/api/v1/account/register', payload(wallet));
   assert.equal(reg.status, 201);
   let sid = cookieValue(reg.setCookie)!;
@@ -162,7 +183,18 @@ async function fullyRegistered(base: string, env: { capture: Capture }, wallet =
   const waCode = env.capture.whatsapp[env.capture.whatsapp.length - 1].code;
   assert.equal((await resp(base, '/api/v1/account/otp-whatsapp/verify', { code: waCode }, `priestate_sid=${sid}`)).status, 200);
 
-  assert.equal((await resp(base, '/api/v1/account/google/complete', { authCode: 'abc' }, `priestate_sid=${sid}`)).status, 200);
+  // Real Google flow: begin → provider callback (code exchange) → complete.
+  const gBegin = await resp(base, '/api/v1/account/google/begin', {}, `priestate_sid=${sid}`);
+  assert.equal(gBegin.status, 200);
+  const state = gBegin.body.state as string;
+  const nonce = gBegin.body.nonce as string;
+  const devCode = env.kit.devAuthorizationCode(nonce);
+  const cb = await fetch(
+    base + `/api/v1/account/google/callback?state=${encodeURIComponent(state)}&code=${encodeURIComponent(devCode)}`,
+    { redirect: 'manual' },
+  );
+  assert.equal(cb.status, 302, 'callback redirects the popup after a verified exchange');
+  assert.equal((await resp(base, '/api/v1/account/google/complete', { state, nonce }, `priestate_sid=${sid}`)).status, 200);
 
   // Part 8: identity verification is now real server-side biometric enrollment
   // (single-use token + real embedding), NOT a bare `confirmed:true` flag.
@@ -294,10 +326,10 @@ test('a wrong wallet cannot use login state issued for another wallet', async (t
   assert.equal(attempt.body.reason, 'not-found');
 });
 
-test('invalid SMS OTP cannot make a login factor ready', () => {
+test('invalid SMS OTP cannot make a login factor ready', async () => {
   const { service, delivered } = makeLoginService();
   assert.equal(service.register(payload()).ok, true);
-  assert.equal(service.issueSmsOtp(WALLET).ok, true);
+  assert.equal((await service.issueSmsOtp(WALLET)).ok, true);
   void lastDeliveredCode(delivered, 'sms');
   const bad = service.verifySmsOtp(WALLET, '000001');
   assert.equal(bad.ok, false);
@@ -305,10 +337,10 @@ test('invalid SMS OTP cannot make a login factor ready', () => {
   assert.equal(service.loginState(WALLET)?.allFactorsReady, false);
 });
 
-test('expired SMS OTP cannot make a login factor ready', () => {
+test('expired SMS OTP cannot make a login factor ready', async () => {
   const { service, delivered, clock } = makeLoginService();
   assert.equal(service.register(payload()).ok, true);
-  assert.equal(service.issueSmsOtp(WALLET).ok, true);
+  assert.equal((await service.issueSmsOtp(WALLET)).ok, true);
   const code = lastDeliveredCode(delivered, 'sms');
   clock.advance(6 * 60 * 1000); // past the 5-minute SMS TTL
   const expired = service.verifySmsOtp(WALLET, code);
@@ -318,10 +350,10 @@ test('expired SMS OTP cannot make a login factor ready', () => {
   assert.equal(service.loginState(WALLET)?.allFactorsReady, false);
 });
 
-test('SMS OTP cannot be reused to flip a login factor', () => {
+test('SMS OTP cannot be reused to flip a login factor', async () => {
   const { service, delivered } = makeLoginService();
   assert.equal(service.register(payload()).ok, true);
-  assert.equal(service.issueSmsOtp(WALLET).ok, true);
+  assert.equal((await service.issueSmsOtp(WALLET)).ok, true);
   const code = lastDeliveredCode(delivered, 'sms');
   assert.equal(service.verifySmsOtp(WALLET, code).ok, true);
   // Reuse after consumption fails and cannot grant the factor twice.
@@ -333,10 +365,10 @@ test('SMS OTP cannot be reused to flip a login factor', () => {
   assert.equal(blank?.allFactorsReady, false);
 });
 
-test('invalid WhatsApp OTP cannot make a login factor ready', () => {
+test('invalid WhatsApp OTP cannot make a login factor ready', async () => {
   const { service, delivered } = makeLoginService();
   assert.equal(service.register(payload()).ok, true);
-  assert.equal(service.issueWhatsappOtp(WALLET).ok, true);
+  assert.equal((await service.issueWhatsappOtp(WALLET)).ok, true);
   void lastDeliveredCode(delivered, 'whatsapp');
   const bad = service.verifyWhatsappOtp(WALLET, '999999');
   assert.equal(bad.ok, false);
@@ -344,10 +376,10 @@ test('invalid WhatsApp OTP cannot make a login factor ready', () => {
   assert.equal(service.loginState(WALLET)?.allFactorsReady, false);
 });
 
-test('expired WhatsApp OTP cannot make a login factor ready', () => {
+test('expired WhatsApp OTP cannot make a login factor ready', async () => {
   const { service, delivered, clock } = makeLoginService();
   assert.equal(service.register(payload()).ok, true);
-  assert.equal(service.issueWhatsappOtp(WALLET).ok, true);
+  assert.equal((await service.issueWhatsappOtp(WALLET)).ok, true);
   const code = lastDeliveredCode(delivered, 'whatsapp');
   clock.advance(11 * 60 * 1000); // past the 10-minute WhatsApp TTL
   const expired = service.verifyWhatsappOtp(WALLET, code);
@@ -357,10 +389,10 @@ test('expired WhatsApp OTP cannot make a login factor ready', () => {
   assert.equal(service.loginState(WALLET)?.allFactorsReady, false);
 });
 
-test('WhatsApp OTP cannot be reused to flip a login factor', () => {
+test('WhatsApp OTP cannot be reused to flip a login factor', async () => {
   const { service, delivered } = makeLoginService();
   assert.equal(service.register(payload()).ok, true);
-  assert.equal(service.issueWhatsappOtp(WALLET).ok, true);
+  assert.equal((await service.issueWhatsappOtp(WALLET)).ok, true);
   const code = lastDeliveredCode(delivered, 'whatsapp');
   assert.equal(service.verifyWhatsappOtp(WALLET, code).ok, true);
   const reuse = service.verifyWhatsappOtp(WALLET, code);
@@ -370,39 +402,45 @@ test('WhatsApp OTP cannot be reused to flip a login factor', () => {
   assert.equal(st?.allFactorsReady, false);
 });
 
-test('Google login state is bound to the initiating wallet', () => {
-  const { service } = makeLoginService();
+test('Google login state is bound to the initiating wallet', async () => {
+  const { service, kit } = makeLoginService();
   assert.equal(service.register(payload()).ok, true);
   const begin = service.googleBegin(WALLET);
   assert.ok(begin.ok);
   if (!begin.ok) return;
-  const r = service.googleComplete(WRONG_WALLET, { state: begin.state, nonce: begin.nonce, code: 'code' });
+  const code = kit.devAuthorizationCode(begin.nonce);
+  assert.equal((await service.googleOAuthRedirect({ state: begin.state, code })).ok, true);
+  const r = service.googleComplete(WRONG_WALLET, { state: begin.state, nonce: begin.nonce });
   assert.equal(r.ok, false);
   if (!r.ok) assert.equal(r.reason, 'bad-state');
   assert.equal(service.loginState(WALLET)?.googleVerified, false);
 });
 
-test('a used Google login challenge cannot be replayed', () => {
-  const { service } = makeLoginService();
+test('a used Google login challenge cannot be replayed', async () => {
+  const { service, kit } = makeLoginService();
   assert.equal(service.register(payload()).ok, true);
   const begin = service.googleBegin(WALLET);
   assert.ok(begin.ok);
   if (!begin.ok) return;
-  const first = service.googleComplete(WALLET, { state: begin.state, nonce: begin.nonce, code: 'code' });
+  const code = kit.devAuthorizationCode(begin.nonce);
+  assert.equal((await service.googleOAuthRedirect({ state: begin.state, code })).ok, true);
+  const first = service.googleComplete(WALLET, { state: begin.state, nonce: begin.nonce });
   assert.equal(first.ok, true);
-  const replay = service.googleComplete(WALLET, { state: begin.state, nonce: begin.nonce, code: 'code' });
+  const replay = service.googleComplete(WALLET, { state: begin.state, nonce: begin.nonce });
   assert.equal(replay.ok, false);
   assert.equal(service.loginState(WALLET)?.googleVerified, true, 'factor set exactly once');
 });
 
-test('an expired Google login challenge fails closed', () => {
-  const { service, clock } = makeLoginService();
+test('an expired Google login challenge fails closed', async () => {
+  const { service, kit, clock } = makeLoginService();
   assert.equal(service.register(payload()).ok, true);
   const begin = service.googleBegin(WALLET);
   assert.ok(begin.ok);
   if (!begin.ok) return;
+  const code = kit.devAuthorizationCode(begin.nonce);
+  assert.equal((await service.googleOAuthRedirect({ state: begin.state, code })).ok, true);
   clock.advance(GOOGLE_STATE_TTL_MS + 1);
-  const r = service.googleComplete(WALLET, { state: begin.state, nonce: begin.nonce, code: 'code' });
+  const r = service.googleComplete(WALLET, { state: begin.state, nonce: begin.nonce });
   assert.equal(r.ok, false);
   if (!r.ok) assert.equal(r.reason, 'expired');
   assert.equal(service.loginState(WALLET)?.googleVerified, false);
@@ -463,7 +501,18 @@ test('the minted session remains bound to the authenticating wallet', async (t) 
   const loginSid = cookieValue(login.setCookie)!;
 
   // The login session authenticates protected account endpoints for WALLET.
-  const authed = await resp(base, '/api/v1/account/google/complete', { authCode: 'fresh' }, `priestate_sid=${loginSid}`);
+  // (google-complete requires a valid session and succeeds over HTTP).
+  const git = await resp(base, '/api/v1/account/google/begin', {}, `priestate_sid=${loginSid}`);
+  assert.equal(git.status, 200);
+  const state = git.body.state as string;
+  const nonce = git.body.nonce as string;
+  const code = env.kit.devAuthorizationCode(nonce);
+  const cb = await fetch(
+    base + `/api/v1/account/google/callback?state=${encodeURIComponent(state)}&code=${encodeURIComponent(code)}`,
+    { redirect: 'manual' },
+  );
+  assert.equal(cb.status, 302);
+  const authed = await resp(base, '/api/v1/account/google/complete', { state, nonce }, `priestate_sid=${loginSid}`);
   assert.equal(authed.status, 200);
 
   // Logout revokes the session → the same cookie no longer authenticates.

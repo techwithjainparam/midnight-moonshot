@@ -23,7 +23,14 @@ import { randomBytes } from 'node:crypto';
 import { OtpService, type OtpIssueResult, type OtpVerifyResult } from '../lib/otp-service.js';
 import type { AccountStore } from './store.js';
 import { InMemoryAccountStore } from './store.js';
-import { GoogleProvider, type GoogleBeginResult, type GoogleCompleteResult } from './google-provider.js';
+import {
+  GoogleProvider,
+  type GoogleBeginResult,
+  type GoogleCompleteResult,
+  type GoogleProviderObject,
+} from './google-provider.js';
+import type { SmsProvider, SmsSendResult } from './sms-provider.js';
+import type { WhatsAppProvider, WhatsAppSendResult } from './whatsapp-provider.js';
 import {
   deriveRegistrationState,
   type RegistrationFactor,
@@ -73,6 +80,28 @@ export type AccountResult =
   | { ok: true; session: { accountId: string } }
   | { ok: false; reason: 'unavailable' | 'unauthorized' | 'invalid-input' | 'not-found' | 'already-registered' | 'duplicate-otp' | 'factor-missing' | 'otp-required' | 'identity-verification-required' | 'bad-state' | 'expired' | 'replay' | 'identity-evidence-rejected' };
 
+/** Fail-closed default used when no SMS provider is wired. */
+function unconfiguredSmsProvider(): SmsProvider {
+  return {
+    name: 'unconfigured',
+    configured: false,
+    send: (): Promise<SmsSendResult> => Promise.resolve({ ok: false, reason: 'unconfigured' }),
+  };
+}
+
+/** Fail-closed default used when no WhatsApp provider is wired. */
+function unconfiguredWhatsAppProvider(): WhatsAppProvider {
+  return {
+    name: 'unconfigured',
+    configured: false,
+    send: (): Promise<WhatsAppSendResult> => Promise.resolve({ ok: false, reason: 'unconfigured' }),
+  };
+}
+
+export type AccountOtpIssueResult =
+  | OtpIssueResult
+  | { ok: false; reason: 'unavailable' | 'not-found' | 'delivery-failed' };
+
 export interface AccountServiceOptions {
   readonly store?: AccountStore;
   readonly otp: {
@@ -91,25 +120,19 @@ export interface AccountServiceOptions {
   /** Optional single-use session book (injectable for deterministic tests). */
   readonly biometricSessions?: BiometricSessionBook;
   /**
-   * SMS delivery transport. In production this is a real gateway; when
-   * `configured` is false the feature reports `unavailable` (fail closed).
-   * Tests inject a capture transport that records the code they generate.
+   * SMS delivery transport — a REAL gateway adapter (see `sms-provider.ts`).
+   * When `configured` is false the feature reports `unavailable` (fail closed).
+   * Tests inject a capture transport at the provider boundary.
    */
-  readonly smsDelivery?: { readonly configured: boolean; readonly send: (to: string, code: string) => void };
+  readonly smsProvider?: SmsProvider;
   /** WhatsApp delivery transport (same honest boundary as SMS). */
-  readonly whatsappDelivery?: { readonly configured: boolean; readonly send: (to: string, code: string) => void };
+  readonly whatsAppProvider?: WhatsAppProvider;
   /**
-   * Google OAuth boundary. In production `complete` exchanges a real auth
-   * code for an ID token and validates issuer/audience. Without a live
-   * provider it returns false so the feature stays `unavailable`.
+   * Real Google OAuth provider carrying the state+nonce challenge and the
+   * server-verified ID-token exchange. Without a live provider the Google
+   * factor stays `unavailable` and can never be fabricated.
    */
-  readonly googleAuthenticator?: { readonly configured: boolean; readonly complete: (code: string) => boolean };
-  /**
-   * Optional secure Google OAuth session manager used for the registration
-   * `begin`/`complete(state, nonce, code)` flow. When omitted, a provider is
-   * derived from `googleAuthenticator`.
-   */
-  readonly googleProvider?: GoogleProvider;
+  readonly googleProvider?: GoogleProviderObject;
   readonly now?: () => number;
 }
 
@@ -121,10 +144,9 @@ export class AccountService {
   private readonly biometricKey: Buffer | null;
   private readonly biometricConfig: Required<BiometricConfig>;
   private readonly biometricSessions: BiometricSessionBook;
-  private readonly smsDelivery: { configured: boolean; send: (to: string, code: string) => void };
-  private readonly whatsappDelivery: { configured: boolean; send: (to: string, code: string) => void };
-  private readonly googleAuthenticator: { configured: boolean; complete: (code: string) => boolean };
-  private readonly googleProvider: GoogleProvider;
+  private readonly smsProvider: SmsProvider;
+  private readonly whatsAppProvider: WhatsAppProvider;
+  private readonly googleProvider: GoogleProviderObject;
   readonly smsConfigured: boolean;
   readonly whatsappConfigured: boolean;
   readonly googleConfigured: boolean;
@@ -154,20 +176,28 @@ export class AccountService {
       maxAttempts: options.otp.whatsappMaxAttempts ?? 5,
       now: options.now,
     });
-    this.smsDelivery = options.smsDelivery ?? { configured: false, send: () => undefined };
-    this.whatsappDelivery = options.whatsappDelivery ?? { configured: false, send: () => undefined };
-    this.googleAuthenticator =
-      options.googleAuthenticator ?? { configured: false, complete: () => false };
+    this.smsProvider =
+      options.smsProvider ??
+      unconfiguredSmsProvider();
+    this.whatsAppProvider =
+      options.whatsAppProvider ??
+      unconfiguredWhatsAppProvider();
     this.googleProvider =
       options.googleProvider ??
       new GoogleProvider({
-        configured: this.googleAuthenticator.configured,
-        exchange: (code) => this.googleAuthenticator.complete(code),
+        configured: false,
+        authorizeEndpoint: 'https://accounts.google.com/o/oauth2/v2/auth',
+        tokenEndpoint: 'https://oauth2.googleapis.com/token',
+        userinfoEndpoint: 'https://openidconnect.googleapis.com/v1/userinfo',
+        clientId: '',
+        clientSecret: '',
+        redirectUri: '',
+        tokenVerifier: null,
         now: options.now,
       });
-    this.smsConfigured = this.smsDelivery.configured;
-    this.whatsappConfigured = this.whatsappDelivery.configured;
-    this.googleConfigured = this.googleAuthenticator.configured;
+    this.smsConfigured = this.smsProvider.configured;
+    this.whatsappConfigured = this.whatsAppProvider.configured;
+    this.googleConfigured = this.googleProvider.configured;
   }
 
   /** Public config exposed to clients so the UI can show honest states. */
@@ -280,23 +310,31 @@ export class AccountService {
 
   /**
    * Issue an SMS OTP to the account's registered mobile and hand the raw code
-   * to the SMS delivery transport. The code is never returned to the caller
-   * (it never reaches the browser); only the OTP service's HMAC hash is kept.
+   * to the REAL SMS delivery transport. The code is never returned to the
+   * caller (it never reaches the browser); only the OTP service's HMAC hash is
+   * kept. The hash is persisted ONLY after the gateway confirms delivery, so a
+   * failing/absent gateway can never mint an OTP and never burns the user's
+   * cooldown/rate budget.
    */
-  issueSmsOtp(
-    walletAddress: string,
-  ): OtpIssueResult | { ok: false; reason: 'unavailable' | 'not-found' } {
+  async issueSmsOtp(walletAddress: string): Promise<AccountOtpIssueResult> {
     if (!this.smsConfigured) return { ok: false, reason: 'unavailable' };
     const record = this.store.getByWallet(walletAddress);
     if (!record) return { ok: false, reason: 'not-found' };
     const pii = this.decryptPii(walletAddress);
     if (!pii.ok || !('pii' in pii)) return { ok: false, reason: 'not-found' };
     const key = OtpService.keyFor('sms', record.walletAddress);
-    const result = this.smsOtp.issue(key);
-    if (result.ok) {
-      this.smsDelivery.send(pii.pii.mobileE164, result.code);
-    }
-    return result;
+    const begun = this.smsOtp.beginIssue(key);
+    if (!begun.ok) return begun;
+    const delivery = await this.smsProvider.send(pii.pii.mobileE164, begun.code);
+    if (!delivery.ok) return { ok: false, reason: 'delivery-failed' };
+    const committed = this.smsOtp.commitIssue(key, begun.code, begun.expiresAt);
+    if (!committed.ok) return committed;
+    return {
+      ok: true,
+      code: begun.code,
+      expiresAt: begun.expiresAt,
+      resendAvailableAt: committed.resendAvailableAt,
+    };
   }
 
   verifySmsOtp(
@@ -314,20 +352,25 @@ export class AccountService {
     return result;
   }
 
-  issueWhatsappOtp(
-    walletAddress: string,
-  ): OtpIssueResult | { ok: false; reason: 'unavailable' | 'not-found' } {
+  async issueWhatsappOtp(walletAddress: string): Promise<AccountOtpIssueResult> {
     if (!this.whatsappConfigured) return { ok: false, reason: 'unavailable' };
     const record = this.store.getByWallet(walletAddress);
     if (!record) return { ok: false, reason: 'not-found' };
     const pii = this.decryptPii(walletAddress);
     if (!pii.ok || !('pii' in pii)) return { ok: false, reason: 'not-found' };
     const key = OtpService.keyFor('whatsapp', record.walletAddress);
-    const result = this.whatsappOtp.issue(key);
-    if (result.ok) {
-      this.whatsappDelivery.send(pii.pii.mobileE164, result.code);
-    }
-    return result;
+    const begun = this.whatsappOtp.beginIssue(key);
+    if (!begun.ok) return begun;
+    const delivery = await this.whatsAppProvider.send(pii.pii.mobileE164, begun.code);
+    if (!delivery.ok) return { ok: false, reason: 'delivery-failed' };
+    const committed = this.whatsappOtp.commitIssue(key, begun.code, begun.expiresAt);
+    if (!committed.ok) return committed;
+    return {
+      ok: true,
+      code: begun.code,
+      expiresAt: begun.expiresAt,
+      resendAvailableAt: committed.resendAvailableAt,
+    };
   }
 
   verifyWhatsappOtp(
@@ -345,43 +388,42 @@ export class AccountService {
     return result;
   }
 
-  // ── Google (provider boundary) ─────────────────────────────────────
-
-  /**
-   * Complete Google linking. The real OAuth exchange happens behind the
-   * `googleAuthenticator` boundary; without a live provider this returns
-   * `unavailable`. We never fabricate a successful exchange.
-   */
-  completeGoogle(walletAddress: string, authCode: string): AccountResult {
-    if (!this.googleConfigured) return { ok: false, reason: 'unavailable' };
-    if (!this.googleAuthenticator.complete(authCode)) {
-      return { ok: false, reason: 'unauthorized' };
-    }
-    const record = this.store.getByWallet(walletAddress);
-    if (!record) return { ok: false, reason: 'not-found' };
-    this.store.update(walletAddress, { googleLinked: true });
-    const updated = this.store.getByWallet(walletAddress)!;
-    return { ok: true, view: toPublicAccountView(updated) };
-  }
+  // ── Google (real OAuth2 authorization-code flow) ──────────────────
 
   /**
    * Start a secure Google sign-in for the registration flow. Issues a fresh
-   * state + nonce challenge bound to the wallet. Fail-closed when the Google
-   * provider is unconfigured. The nonce is returned to the in-app client and
-   * must be echoed back alongside the OAuth state on completion.
+   * state + nonce (+ PKCE code challenge) bound to the wallet and returns the
+   * REAL Google authorization URL the client should open. Fail-closed when the
+   * Google provider is unconfigured. The nonce is returned to the in-app
+   * client and must be echoed back alongside the OAuth state on completion.
    */
   googleBegin(walletAddress: string): GoogleBeginResult {
     return this.googleProvider.begin(walletAddress);
   }
 
   /**
+   * Handle the OAuth2 authorization redirect from Google (the GET callback
+   * route). Exchanges the code for tokens, cryptographically verifies the ID
+   * token (iss/aud/exp/nonce + signature) and cross-checks the userinfo
+   * profile. On success the challenge is consumable by `googleComplete`.
+   */
+  async googleOAuthRedirect(params: {
+    state: string;
+    code?: string;
+    error?: string;
+  }): Promise<GoogleCompleteResult> {
+    return this.googleProvider.handleOAuthRedirect(params);
+  }
+
+  /**
    * Complete a secure Google sign-in. Validates the state/nonce challenge
-   * (single-use, wallet-bound, TTL) before exchanging the code. On success,
-   * marks the account's Google factor verified. Never fabricates a success.
+   * (single-use, wallet-bound, TTL) that must have already survived a
+   * server-verified OAuth redirect. On success, marks the account's Google
+   * factor verified. Never fabricates a success.
    */
   googleComplete(
     walletAddress: string,
-    params: { state: string; nonce: string; code: string },
+    params: { state: string; nonce: string },
   ): AccountResult {
     const result: GoogleCompleteResult = this.googleProvider.complete(walletAddress, params);
     if (!result.ok) {

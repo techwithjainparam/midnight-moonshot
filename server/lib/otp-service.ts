@@ -34,6 +34,14 @@ export type OtpVerifyResult =
   | { ok: true }
   | { ok: false; reason: 'expired' | 'invalid' | 'too-many-attempts' };
 
+export type OtpBeginResult =
+  | { ok: true; code: string; expiresAt: number }
+  | { ok: false; reason: 'cooldown' | 'rate-limited'; retryAfterMs: number };
+
+export type OtpCommitResult =
+  | { ok: true; resendAvailableAt: number }
+  | { ok: false; reason: 'cooldown' | 'rate-limited'; retryAfterMs: number };
+
 export interface OtpServiceOptions {
   /** Secret used to HMAC the stored code hashes. */
   readonly hashSecret: string;
@@ -97,6 +105,26 @@ export class OtpService {
    * "ip:1.2.3.4"). Returns metadata only — never the code itself.
    */
   issue(key: string): OtpIssueResult {
+    const begun = this.beginIssue(key);
+    if (!begun.ok) return begun;
+    const committed = this.commitIssue(key, begun.code, begun.expiresAt);
+    if (!committed.ok) return committed;
+    return {
+      ok: true,
+      code: begun.code,
+      expiresAt: begun.expiresAt,
+      resendAvailableAt: committed.resendAvailableAt,
+    };
+  }
+
+  /**
+   * Two-phase issue (used by real delivery transports): generate a candidate
+   * code and validate cooldown/rate limits WITHOUT recording anything. The
+   * result must be stored via `commitIssue` only AFTER the transport confirms
+   * delivery, so a failed delivery never persists an undeliverable code and
+   * never consumes the user's cooldown/rate budget.
+   */
+  beginIssue(key: string): OtpBeginResult {
     const t = this.now();
     const hist = this.history.get(key) ?? { stamps: [], lastSentAt: null };
 
@@ -116,23 +144,43 @@ export class OtpService {
 
     // 6-digit numeric code, uniformly random.
     const code = String(randomInt(100_000, 1_000_000));
-    this.active.set(key, {
-      codeHash: this.hashCode(key, code),
-      expiresAt: t + this.ttlMs,
-      attempts: 0,
-    });
+    return { ok: true, code, expiresAt: t + this.ttlMs };
+  }
+
+  /**
+   * Commit a code produced by `beginIssue` AFTER delivery succeeded. Re-runs
+   * the cooldown/rate checks so the recorded history is the authoritative
+   * budget, then stores the HMAC hash (never the raw code).
+   */
+  commitIssue(key: string, code: string, expiresAt: number): OtpCommitResult {
+    const t = this.now();
+    const hist = this.history.get(key) ?? { stamps: [], lastSentAt: null };
+
+    // Rolling-window cap (re-checked atomically within this sync call).
+    hist.stamps = hist.stamps.filter((s) => t - s < this.sendWindowMs);
+    if (hist.stamps.length >= this.maxSendsPerWindow) {
+      const oldest = hist.stamps[0];
+      const retryAfterMs = Math.max(0, oldest + this.sendWindowMs - t);
+      return { ok: false, reason: 'rate-limited', retryAfterMs };
+    }
+
+    // Resend cooldown (re-checked atomically within this sync call).
+    if (hist.lastSentAt !== null && t - hist.lastSentAt < this.resendCooldownMs) {
+      const retryAfterMs = Math.max(0, hist.lastSentAt + this.resendCooldownMs - t);
+      return { ok: false, reason: 'cooldown', retryAfterMs };
+    }
 
     hist.stamps.push(t);
     hist.lastSentAt = t;
     this.history.set(key, hist);
 
-    const result: OtpIssueOk = {
-      ok: true,
-      code,
-      expiresAt: t + this.ttlMs,
-      resendAvailableAt: t + this.resendCooldownMs,
-    };
-    return result;
+    this.active.set(key, {
+      codeHash: this.hashCode(key, code),
+      expiresAt,
+      attempts: 0,
+    });
+
+    return { ok: true, resendAvailableAt: t + this.resendCooldownMs };
   }
 
   /** Check a user-submitted code. Enforces expiry, attempt cap, one-time use. */

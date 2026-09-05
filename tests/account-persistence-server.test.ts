@@ -18,6 +18,8 @@ import type { ServerConfig } from '../server/config';
 import { listenVerificationServer } from '../server/index';
 import { applySchema } from '../server/account/db';
 import { enrollmentVectors, sameFaceVector, differentFaceVector } from './biometric-vectors';
+import { createGoogleTestKit, type GoogleTestKit } from './helpers/google-oauth-kit';
+import type { SmsSendResult, WhatsAppSendResult } from './helpers/provider-types';
 
 const ENC = 'srv-level3-enc-secret';
 const HASH = 'srv-test-otp-hash-secret-0123456789';
@@ -76,15 +78,25 @@ function makeOverrides() {
   const db = new Database(path.join(dir, 'test.db'));
   applySchema(db);
   const capture: Capture = { sms: [], whatsapp: [] };
+  const kit = createGoogleTestKit();
   return {
     dir,
     db,
     capture,
+    kit,
     overrides: {
       db,
-      accountSmsDelivery: { configured: true, send: (to: string, code: string) => { capture.sms.push({ to, code }); } },
-      accountWhatsappDelivery: { configured: true, send: (to: string, code: string) => { capture.whatsapp.push({ to, code }); } },
-      accountGoogleAuthenticator: { configured: true, complete: () => true },
+      accountSmsProvider: {
+        name: 'capture',
+        configured: true,
+        send: async (to: string, code: string): Promise<SmsSendResult> => { capture.sms.push({ to, code }); return { ok: true }; },
+      },
+      accountWhatsAppProvider: {
+        name: 'capture',
+        configured: true,
+        send: async (to: string, code: string): Promise<WhatsAppSendResult> => { capture.whatsapp.push({ to, code }); return { ok: true }; },
+      },
+      accountGoogleProvider: kit.provider,
     },
   };
 }
@@ -106,6 +118,25 @@ function cookieValue(setCookie: string | null | undefined): string | null {
   if (!setCookie) return null;
   const m = /priestate_sid=([0-9a-f]+)/.exec(setCookie);
   return m ? m[1] : null;
+}
+
+/**
+ * Real Google flow over HTTP: begin → provider callback (code exchange
+ * redirect) → complete with state+nonce. Asserts each hop succeeds.
+ */
+async function linkGoogleOverHttp(base: string, kit: GoogleTestKit, sid: string): Promise<void> {
+  const begin = await resp(base, '/api/v1/account/google/begin', {}, `priestate_sid=${sid}`);
+  assert.equal(begin.status, 200);
+  const state = begin.body.state as string;
+  const nonce = begin.body.nonce as string;
+  const code = kit.devAuthorizationCode(nonce);
+  const cb = await fetch(
+    base + `/api/v1/account/google/callback?state=${encodeURIComponent(state)}&code=${encodeURIComponent(code)}`,
+    { redirect: 'manual' },
+  );
+  assert.equal(cb.status, 302, 'callback redirects the popup after a verified exchange');
+  const complete = await resp(base, '/api/v1/account/google/complete', { state, nonce }, `priestate_sid=${sid}`);
+  assert.equal(complete.status, 200, 'google complete should succeed after a verified redirect');
 }
 
 /**
@@ -168,7 +199,7 @@ test('Login sets HttpOnly session cookie that later authenticates; logout revoke
   const waCode = env.capture.whatsapp[env.capture.whatsapp.length - 1].code;
   assert.equal((await resp(base, '/api/v1/account/otp-whatsapp/verify', { code: waCode }, `priestate_sid=${sid}`)).status, 200);
 
-  assert.equal((await resp(base, '/api/v1/account/google/complete', { authCode: 'abc' }, `priestate_sid=${sid}`)).status, 200);
+  await linkGoogleOverHttp(base, env.kit, sid);
   await fullyEnrollOverHttp(base, sid);
 
   // Now login with password.
@@ -178,10 +209,8 @@ test('Login sets HttpOnly session cookie that later authenticates; logout revoke
   const loginSid = cookieValue(login.setCookie)!;
 
   // The login session cookie authenticates a protected account endpoint
-  // (google-complete requires a valid session and returns 200 when the
-  // boundary accepts the code).
-  const authed = await resp(base, '/api/v1/account/google/complete', { authCode: 'fresh' }, `priestate_sid=${loginSid}`);
-  assert.equal(authed.status, 200);
+  // (google-complete requires a valid session and succeeds over HTTP).
+  await linkGoogleOverHttp(base, env.kit, loginSid);
 
   // Logout invalidates the session → same cookie now rejected.
   const logout = await fetch(base + '/api/v1/account/logout', { method: 'POST', headers: { Cookie: `priestate_sid=${loginSid}` } });
@@ -226,7 +255,7 @@ test('Login endpoint is rate limited (429 after 5 attempts)', async (t) => {
   assert.equal(sendWa.status, 200);
   const waCode = env.capture.whatsapp[env.capture.whatsapp.length - 1].code;
   assert.equal((await resp(base, '/api/v1/account/otp-whatsapp/verify', { code: waCode }, `priestate_sid=${sid}`)).status, 200);
-  assert.equal((await resp(base, '/api/v1/account/google/complete', { authCode: 'x' }, `priestate_sid=${sid}`)).status, 200);
+  await linkGoogleOverHttp(base, env.kit, sid);
   await fullyEnrollOverHttp(base, sid);
 
   // 5 login attempts, all with wrong password → 401. 6th is rate limited.
@@ -245,7 +274,7 @@ test('Unauthenticated biometric-enrollment-begin and google-complete return 401'
   t.after(async () => { await stack.close(); rmSync(env.dir, { recursive: true, force: true }); });
 
   assert.equal((await resp(base, '/api/v1/account/biometric/enrollment/begin', {})).status, 401);
-  assert.equal((await resp(base, '/api/v1/account/google/complete', { authCode: 'x' })).status, 401);
+  assert.equal((await resp(base, '/api/v1/account/google/complete', { state: 's', nonce: 'n' })).status, 401);
   assert.equal((await resp(base, '/api/v1/account/otp-whatsapp/verify', { code: '123456' })).status, 401);
 });
 
@@ -273,7 +302,7 @@ test('Part 8: server-authoritative login face match over HTTP', async (t) => {
   assert.equal(sendWa.status, 200);
   const waCode = env.capture.whatsapp[env.capture.whatsapp.length - 1].code;
   assert.equal((await resp(base, '/api/v1/account/otp-whatsapp/verify', { code: waCode }, `priestate_sid=${sid}`)).status, 200);
-  assert.equal((await resp(base, '/api/v1/account/google/complete', { authCode: 'x' }, `priestate_sid=${sid}`)).status, 200);
+  await linkGoogleOverHttp(base, env.kit, sid);
   await fullyEnrollOverHttp(base, sid);
 
   // Begin a verification session — no session cookie required (public-purpose

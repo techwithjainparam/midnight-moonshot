@@ -19,6 +19,7 @@ import {
 } from '../server/account/security';
 import { InMemoryAccountStore } from '../server/account/store';
 import { AccountService } from '../server/account/service';
+import { configuredProviders } from './helpers/account-service-testing';
 
 const ENC_SECRET = 'level3-unit-test-enc-secret-0000';
 
@@ -27,9 +28,7 @@ function makeService(): AccountService {
     store: new InMemoryAccountStore(),
     encryptionSecret: ENC_SECRET,
     otp: { hashSecret: 'hanaunit-test-otp-secret' },
-    smsDelivery: { configured: true, send: () => undefined },
-    whatsappDelivery: { configured: true, send: () => undefined },
-    googleAuthenticator: { configured: true, complete: () => true },
+    ...configuredProviders(),
   });
 }
 

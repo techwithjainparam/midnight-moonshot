@@ -66,6 +66,21 @@ import { SqliteAccountStore } from './account/sqlite-store';
 import { SessionService } from './account/session';
 import type { IdentityEvidence } from './account/model';
 import type { FaceEmbedding } from './account/biometric';
+import { createSmsProviderFromConfig, type SmsProvider } from './account/sms-provider';
+import { createWhatsAppProviderFromConfig, type WhatsAppProvider } from './account/whatsapp-provider';
+import {
+  createGoogleProviderFromConfig,
+  GOOGLE_STATE_TTL_MS,
+  type GoogleProviderDomain,
+  type GoogleProviderObject,
+} from './account/google-provider';
+import {
+  OAuthHttp,
+  GoogleUserInfoHttp,
+} from './lib/oauth-http';
+import type { TokenVerifier } from './lib/id-token-verifier';
+import { createOidcVerifier } from './lib/identity-provider-oidc';
+import { OAuthStateSession } from './lib/oauth-state';
 
 export interface VerificationServerOverrides {
   /** Test seam: replace SMTP delivery with a capture transport. */
@@ -86,8 +101,38 @@ export interface VerificationServerOverrides {
   readonly accountSmsDelivery?: { configured: boolean; send: (to: string, code: string) => void };
   /** Test seam: WhatsApp OTP delivery transport. */
   readonly accountWhatsappDelivery?: { configured: boolean; send: (to: string, code: string) => void };
-  /** Test seam: Google OAuth boundary. */
-  readonly accountGoogleAuthenticator?: { configured: boolean; complete: (code: string) => boolean };
+  /**
+   * Test seam: replace the SmsProvider (instead of the legacy synchronous
+   * `accountSmsDelivery`). Useful to inject a real async HTTP transport.
+   */
+  readonly accountSmsProvider?: SmsProvider;
+  /**
+   * Test seam: replace the WhatsAppProvider (instead of the legacy synchronous
+   * `accountWhatsappDelivery`).
+   */
+  readonly accountWhatsAppProvider?: WhatsAppProvider;
+  /**
+   * Test seam: replace the GoogleProvider (carries the state+nonce challenge
+   * and a real or double ID-token exchange).
+   */
+  readonly accountGoogleProvider?: GoogleProviderObject;
+  /**
+   * Test seam: replace the OIDC token verifier used for ID-token checks. When
+   * absent the provider builds one from config (fail-closed if unconfigured).
+   */
+  readonly oidcTokenVerifier?: TokenVerifier;
+  /**
+   * Test seam: override the OAuth HTTP client (fetch/exchange/redirect/JWKS).
+   */
+  readonly oauthHttp?: OAuthHttp;
+  /** Test seam: override the userinfo fetcher (cross-checks ID-token `sub`). */
+  readonly googleUserInfo?: GoogleUserInfoHttp;
+  /**
+   * Test seam: override the Google provider's derived capabilities/URLs.
+   */
+  readonly googleDomain?: Partial<GoogleProviderDomain>;
+  /** Test seam: pre-built OAuth state session store (challenge book). */
+  readonly oauthStateStore?: OAuthStateSession;
   /** Test seam: provide a pre-built SessionService. */
   readonly sessionService?: SessionService;
   /** Test seam: SQLite database handle (skips openDatabase when set). */
@@ -163,27 +208,76 @@ export function createVerificationServer(
       ttlMs: config.account?.sessionTtlMs,
     });
 
+  // ── Real OAuth / delivery provider wiring (J.4) ─────────────────
+
+  // SMS / WhatsApp: REAL HTTP transport adapters that fail closed when no
+  // gateway is configured. Tests inject deterministic local doubles at the
+  // provider boundary; the adapters themselves never fake delivery.
+  const smsProvider: SmsProvider =
+    overrides.accountSmsProvider ?? createSmsProviderFromConfig(config.account);
+  const whatsAppProvider: WhatsAppProvider =
+    overrides.accountWhatsAppProvider ?? createWhatsAppProviderFromConfig(config.account);
+
+  // Google: a REAL OAuth2 authorization-code provider with server-side
+  // state+nonce, ID-token JWKS verification, and a redirect callback. When no
+  // client id/secret are configured it reports `configured:false` and every
+  // begin/complete step fails closed — we never invent a Google login.
+  const oauthHttp: OAuthHttp =
+    overrides.oauthHttp ?? new OAuthHttp(config.account?.googleOauth?.timeoutMs);
+  const tokenVerifier: TokenVerifier | null =
+    overrides.oidcTokenVerifier ??
+    createOidcVerifier(
+      config.account?.googleOauth
+        ? {
+            enabled: config.account.googleOauth.enabled,
+            issuer: config.account.googleOauth.issuer ?? 'https://accounts.google.com',
+            audience: config.account.googleOauth.clientId ?? '',
+            jwksUri: config.account.googleOauth.jwksUri ?? 'https://www.googleapis.com/oauth2/v3/certs',
+          }
+        : undefined,
+    );
+  const googleUserInfo: GoogleUserInfoHttp = overrides.googleUserInfo ?? new GoogleUserInfoHttp();
+  const googleDomain: GoogleProviderDomain = {
+    enabled: overrides.googleDomain?.enabled ?? config.account?.googleOauth?.enabled,
+    clientId: overrides.googleDomain?.clientId ?? config.account?.googleOauth?.clientId ?? '',
+    clientSecret:
+      overrides.googleDomain?.clientSecret ?? config.account?.googleOauth?.clientSecret ?? '',
+    oauthAuthorizeEndpoint:
+      overrides.googleDomain?.oauthAuthorizeEndpoint ??
+      config.account?.googleOauth?.oauthAuthorizeEndpoint ?? '',
+    oauthTokenEndpoint:
+      overrides.googleDomain?.oauthTokenEndpoint ??
+      config.account?.googleOauth?.oauthTokenEndpoint ?? '',
+    oauthUserinfoEndpoint:
+      overrides.googleDomain?.oauthUserinfoEndpoint ??
+      config.account?.googleOauth?.oauthUserinfoEndpoint ?? '',
+    redirectUri:
+      overrides.googleDomain?.redirectUri ?? config.account?.googleOauth?.redirectUri ?? '',
+    jwksUri: overrides.googleDomain?.jwksUri ?? config.account?.googleOauth?.jwksUri ?? '',
+    issuer: overrides.googleDomain?.issuer ?? config.account?.googleOauth?.issuer ?? '',
+    stateTtlMs: overrides.googleDomain?.stateTtlMs ?? config.account?.googleOauth?.stateTtlMs,
+  };
+  const googleStateStore: OAuthStateSession =
+    overrides.oauthStateStore ??
+    new OAuthStateSession({ now: () => Date.now(), ttlMs: googleDomain.stateTtlMs ?? GOOGLE_STATE_TTL_MS });
+  const googleProvider: GoogleProviderObject = overrides.accountGoogleProvider ??
+    createGoogleProviderFromConfig({
+      domain: googleDomain,
+      stateStore: googleStateStore,
+      oauthHttp,
+      tokenVerifier,
+      googleUserInfoHttp: googleUserInfo,
+    });
+
   const accountService = new AccountService({
     store: persistentAccountStore,
     encryptionSecret: overrides.accountEncryptionSecret ?? config.account?.encryptionSecret ?? '',
     biometricEncryptionSecret:
       overrides.accountBiometricEncryptionSecret ?? config.account?.biometricEncryptionSecret ?? '',
     otp: { hashSecret: config.otp.hashSecret || DEV_FALLBACK_OTP_SECRET },
-    smsDelivery:
-      overrides.accountSmsDelivery ??
-      (config.account?.smsConfigured
-        ? { configured: true, send: () => undefined }
-        : { configured: false, send: () => undefined }),
-    whatsappDelivery:
-      overrides.accountWhatsappDelivery ??
-      (config.account?.whatsappConfigured
-        ? { configured: true, send: () => undefined }
-        : { configured: false, send: () => undefined }),
-    googleAuthenticator:
-      overrides.accountGoogleAuthenticator ??
-      (config.account?.googleConfigured
-        ? { configured: true, complete: () => false }
-        : { configured: false, complete: () => false }),
+    smsProvider,
+    whatsAppProvider,
+    googleProvider,
   });
 
   const emailSendIpLimiter = new RateLimiter({
@@ -398,6 +492,10 @@ export function createVerificationServer(
       return;
     }
 
+    if (url === '/api/v1/account/google/callback' && req.method === 'GET') {
+      return void (await routeAccountGoogleCallback(req, res));
+    }
+
     if (req.method !== 'POST') {
       sendJson(res, 405, { error: 'method-not-allowed' });
       return;
@@ -469,6 +567,13 @@ export function createVerificationServer(
           ok: false,
           reason: 'unavailable',
           message: 'This factor’s delivery channel is not configured in this demo.',
+        });
+        return;
+      case 'delivery-failed':
+        sendJson(res, 503, {
+          ok: false,
+          reason: 'delivery-failed',
+          message: 'The code could not be delivered to your device. Try again shortly.',
         });
         return;
       case 'unauthorized':
@@ -572,7 +677,7 @@ export function createVerificationServer(
       });
       return;
     }
-    const result = accountService.issueSmsOtp(auth.walletAddress);
+    const result = await accountService.issueSmsOtp(auth.walletAddress);
     if (result.ok === true) {
       sendJson(res, 200, { ok: true, channel: 'sms', expiresAt: result.expiresAt });
       return;
@@ -628,7 +733,7 @@ export function createVerificationServer(
       });
       return;
     }
-    const result = accountService.issueWhatsappOtp(auth.walletAddress);
+    const result = await accountService.issueWhatsappOtp(auth.walletAddress);
     if (result.ok === true) {
       sendJson(res, 200, { ok: true, channel: 'whatsapp', expiresAt: result.expiresAt });
       return;
@@ -675,30 +780,57 @@ export function createVerificationServer(
   ): Promise<void> {
     const auth = requireAuth(req, res);
     if (!auth) return;
-    const authCode = str(body, 'authCode') || str(body, 'code');
     const state = str(body, 'state');
     const nonce = str(body, 'nonce');
-
-    // Secure state/nonce flow: the client begins Google auth, receives a
-    // state+nonce, and echoes them here. If present they are enforced.
-    if (state && nonce) {
-      const result = accountService.googleComplete(auth.walletAddress, { state, nonce, code: authCode });
-      if (result.ok && 'view' in result) {
-        sendJson(res, 200, { ok: true, account: result.view });
-        return;
-      }
-      sendAccountError(res, result.ok ? 'internal' : result.reason);
+    if (!state || !nonce) {
+      sendJson(res, 400, { ok: false, reason: 'bad-state', message: 'Google sign-in state + nonce are required.' });
       return;
     }
+    const result = accountService.googleComplete(auth.walletAddress, { state, nonce });
+    if (result.ok && 'view' in result) {
+      sendJson(res, 200, { ok: true, account: result.view });
+      return;
+    }
+    sendAccountError(res, result.ok ? 'internal' : result.reason);
+  }
 
-    // Legacy code-only path (used by existing tests / simple flows).
-    const result = accountService.completeGoogle(auth.walletAddress, authCode);
+  /**
+   * GET /api/v1/account/google/callback — the OAuth2 authorization redirect
+   * from the identity provider (a POPUP/top-level navigation, deliberately NOT
+   * behind the session cookie). Looks the challenge up by `state`, exchanges
+   * the code over HTTPS, cryptographically verifies the ID token and the
+   * userinfo profile server-side, then redirects the browser to a neutral
+   * completion page. The raw code/token/state are never logged.
+   */
+  async function routeAccountGoogleCallback(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const query = new URL(req.url ?? '', 'http://localhost');
+    const params = {
+      state: query.searchParams.get('state') ?? '',
+      code: query.searchParams.get('code') ?? undefined,
+      error: query.searchParams.get('error') ?? undefined,
+    };
+    if (!params.state) {
+      sendJson(res, 400, { ok: false, reason: 'bad-state' });
+      return;
+    }
+    const result = await accountService.googleOAuthRedirect(params);
     if (!result.ok) {
-      sendAccountError(res, result.reason);
+      sendJson(res, 400, { ok: false, reason: result.reason, message: 'Google sign-in did not complete.' });
       return;
     }
-    if (!('view' in result)) return sendAccountError(res, 'internal');
-    sendJson(res, 200, { ok: true, account: result.view });
+    // The exchange + verification succeeded. Redirect the popup to the
+    // configured allowed origin with an opaque non-secret status query.
+    const target = config.allowedOrigins[0] ?? 'http://localhost:3000';
+    const redirect = new URL(target);
+    redirect.searchParams.set('google', 'pending');
+    res.writeHead(302, {
+      Location: redirect.toString(),
+      'Cache-Control': 'no-store',
+    });
+    res.end();
   }
 
   /** Begin a secure Google sign-in, returning a fresh state + nonce challenge. */

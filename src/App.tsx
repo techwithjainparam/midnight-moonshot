@@ -1,5 +1,7 @@
+import { useEffect } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import { AuthProvider } from './auth/AuthContext';
+import { initGooglePopupLanding } from './auth/google-oauth';
 import RequireWallet from './components/guards/RequireWallet';
 import RequireProfile from './components/guards/RequireProfile';
 import RequireOfficer from './components/guards/RequireOfficer';
@@ -36,6 +38,12 @@ import IdentityVerificationPage from './pages/IdentityVerificationPage';
 // Guards render nothing while authorization state is loading, so no
 // protected content ever flashes before wallet state is known.
 export default function App() {
+  // The Google OAuth popup lands on the app root with `?google=pending` after
+  // a server-verified exchange; announce it to the opener from ANY route.
+  useEffect(() => {
+    initGooglePopupLanding();
+  }, []);
+
   return (
     <AuthProvider>
       <div className="app">

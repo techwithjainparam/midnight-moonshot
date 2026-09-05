@@ -17,6 +17,9 @@ import assert from 'node:assert/strict';
 import { AccountService } from '../server/account/service';
 import { InMemoryAccountStore } from '../server/account/store';
 import { GoogleProvider, GOOGLE_STATE_TTL_MS } from '../server/account/google-provider';
+import type { GoogleProviderConfig } from '../server/account/google-provider';
+import { createGoogleTestKit, type GoogleTestKit } from './helpers/google-oauth-kit';
+import type { SmsSendResult, WhatsAppSendResult } from './helpers/provider-types';
 
 const ENC = 'reg-auth-test-enc-secret';
 const WALLET = '0x' + 'c'.repeat(64);
@@ -28,26 +31,27 @@ function makeService(over: {
   google?: boolean;            // provider configured?
   googleAccept?: boolean;      // underlying exchange outcome
   now?: () => number;
-} = {}): { service: AccountService; capture: Capture } {
+} = {}): { service: AccountService; capture: Capture; kit: GoogleTestKit } {
   const capture: Capture = { sms: [], whatsapp: [] };
-  const provider = new GoogleProvider({
-    configured: over.google ?? true,
-    exchange: () => over.googleAccept ?? true,
-    now: over.now,
-  });
+  const kit = createGoogleTestKit({ accept: over.googleAccept ?? true, now: over.now });
+  const provider = kit.provider;
   const service = new AccountService({
     store: new InMemoryAccountStore(),
     encryptionSecret: ENC,
     otp: { hashSecret: 'reg-auth-test-otp-secret' },
-    smsDelivery: { configured: true, send: (to, code) => capture.sms.push(`${to}:${code}`) },
-    whatsappDelivery: { configured: true, send: (to, code) => capture.whatsapp.push(`${to}:${code}`) },
-    // `googleAuthenticator` drives the configured flag (and `allFactorsConfigured`
-    // / registration availability); the injected `googleProvider` carries the
-    // state+nonce challenge semantics exercised by these tests.
-    googleAuthenticator: { configured: over.google ?? true, complete: () => over.googleAccept ?? true },
+    smsProvider: {
+      name: 'capture',
+      configured: true,
+      send: async (to, code): Promise<SmsSendResult> => { capture.sms.push(`${to}:${code}`); return { ok: true }; },
+    },
+    whatsAppProvider: {
+      name: 'capture',
+      configured: true,
+      send: async (to, code): Promise<WhatsAppSendResult> => { capture.whatsapp.push(`${to}:${code}`); return { ok: true }; },
+    },
     googleProvider: provider,
   });
-  return { service, capture };
+  return { service, capture, kit };
 }
 
 function payload() {
@@ -75,6 +79,19 @@ function lastCode(capture: Capture, channel: 'sms' | 'whatsapp'): string {
   return list[list.length - 1].split(':')[1];
 }
 
+/**
+ * A provider whose verifier can be flipped mid-test, to prove a failed
+ * exchange never lets a challenge complete (auth is never fabricated).
+ */
+function makeFlippableProvider(initialAccept: boolean): {
+  provider: GoogleProvider;
+  kit: GoogleTestKit;
+  setAccept: (accept: boolean) => void;
+} {
+  const kit = createGoogleTestKit({ accept: initialAccept });
+  return { provider: kit.provider, kit, setAccept: kit.setAccept };
+}
+
 // ── Google state + nonce challenge ─────────────────────────────────
 
 test('googleBegin issues a state+nonce challenge bound to the wallet', () => {
@@ -90,113 +107,174 @@ test('googleBegin issues a state+nonce challenge bound to the wallet', () => {
   }
 });
 
-test('googleComplete succeeds with the matching state, nonce and a valid code', () => {
-  const { service } = makeService();
+test('googleComplete succeeds after a verified redirect with the matching nonce', async () => {
+  const { service, kit } = makeService();
   register(service);
   const begin = service.googleBegin(WALLET);
   assert.ok(begin.ok);
   if (!begin.ok) return;
-  const ok = service.googleComplete(WALLET, { state: begin.state, nonce: begin.nonce, code: 'a-valid-auth-code' });
+  const code = kit.devAuthorizationCode(begin.nonce);
+  assert.equal((await service.googleOAuthRedirect({ state: begin.state, code })).ok, true);
+  const ok = service.googleComplete(WALLET, { state: begin.state, nonce: begin.nonce });
   assert.equal(ok.ok, true);
   if (ok.ok) assert.equal((ok as unknown as { view: { googleLinked: boolean } }).view.googleLinked, true);
   assert.equal(service.registrationState(WALLET)?.googleVerified, true);
 });
 
-test('googleComplete rejects a wrong state (bad-state)', () => {
-  const { service } = makeService();
+test('complete() never fabricates auth without a verified redirect', async () => {
+  const { service, kit } = makeService();
   register(service);
   const begin = service.googleBegin(WALLET);
   assert.ok(begin.ok);
   if (!begin.ok) return;
-  const r = service.googleComplete(WALLET, { state: 'forged-state', nonce: begin.nonce, code: 'code' });
+  // Begin-only (no redirect exchange): the challenge is NOT consumable.
+  const soft = service.googleComplete(WALLET, { state: begin.state, nonce: begin.nonce });
+  assert.equal(soft.ok, false);
+  if (!soft.ok) assert.equal(soft.reason, 'unauthorized');
+  assert.equal(service.registrationState(WALLET)?.googleVerified, false);
+  // A garbage code fails the redirect exchange — still nothing to complete.
+  const failed = await service.googleOAuthRedirect({ state: begin.state, code: 'bogus-code' });
+  assert.equal(failed.ok, false);
+  const afterFail = service.googleComplete(WALLET, { state: begin.state, nonce: begin.nonce });
+  assert.equal(afterFail.ok, false);
+  assert.equal(service.registrationState(WALLET)?.googleVerified, false);
+  void kit;
+});
+
+test('googleComplete rejects a wrong state (bad-state)', async () => {
+  const { service, kit } = makeService();
+  register(service);
+  const begin = service.googleBegin(WALLET);
+  assert.ok(begin.ok);
+  if (!begin.ok) return;
+  const code = kit.devAuthorizationCode(begin.nonce);
+  assert.equal((await service.googleOAuthRedirect({ state: begin.state, code })).ok, true);
+  const r = service.googleComplete(WALLET, { state: 'forged-state', nonce: begin.nonce });
   assert.equal(r.ok, false);
   if (!r.ok) assert.equal(r.reason, 'bad-state');
 });
 
-test('googleComplete rejects a wrong nonce (bad-state)', () => {
-  const { service } = makeService();
+test('googleComplete rejects a wrong nonce (bad-state)', async () => {
+  const { service, kit } = makeService();
   register(service);
   const begin = service.googleBegin(WALLET);
   assert.ok(begin.ok);
   if (!begin.ok) return;
-  const r = service.googleComplete(WALLET, { state: begin.state, nonce: 'forged-nonce', code: 'code' });
+  const code = kit.devAuthorizationCode(begin.nonce);
+  assert.equal((await service.googleOAuthRedirect({ state: begin.state, code })).ok, true);
+  const r = service.googleComplete(WALLET, { state: begin.state, nonce: 'forged-nonce' });
   assert.equal(r.ok, false);
   if (!r.ok) assert.equal(r.reason, 'bad-state');
 });
 
-test('a used google challenge cannot be replayed', () => {
-  const { service } = makeService();
+test('a used google challenge cannot be replayed', async () => {
+  const { service, kit } = makeService();
   register(service);
   const begin = service.googleBegin(WALLET);
   assert.ok(begin.ok);
   if (!begin.ok) return;
-  const first = service.googleComplete(WALLET, { state: begin.state, nonce: begin.nonce, code: 'code' });
+  const code = kit.devAuthorizationCode(begin.nonce);
+  assert.equal((await service.googleOAuthRedirect({ state: begin.state, code })).ok, true);
+  const first = service.googleComplete(WALLET, { state: begin.state, nonce: begin.nonce });
   assert.equal(first.ok, true);
   // The successful challenge is single-use: replaying it must fail.
-  const replay = service.googleComplete(WALLET, { state: begin.state, nonce: begin.nonce, code: 'code' });
+  const replay = service.googleComplete(WALLET, { state: begin.state, nonce: begin.nonce });
   assert.equal(replay.ok, false);
 });
 
-test('a consumed challenge after a failed exchange is a replay, not a retry', () => {
-  let attempt = 0;
+test('a failed exchange never fabricates success, even if it later succeeds', async () => {
+  const { provider, kit, setAccept } = makeFlippableProvider(false);
   const capture: Capture = { sms: [], whatsapp: [] };
-  const provider = new GoogleProvider({
-    configured: true,
-    exchange: () => { attempt += 1; return attempt === 1 ? false : true; },
-  });
   const service = new AccountService({
     store: new InMemoryAccountStore(),
     encryptionSecret: ENC,
     otp: { hashSecret: 'reg-auth-test-otp-secret' },
-    smsDelivery: { configured: true, send: (t, c) => capture.sms.push(`${t}:${c}`) },
-    whatsappDelivery: { configured: true, send: (t, c) => capture.whatsapp.push(`${t}:${c}`) },
-    googleAuthenticator: { configured: true, complete: () => true },
+    smsProvider: {
+      name: 'capture',
+      configured: true,
+      send: async (to, code): Promise<SmsSendResult> => { capture.sms.push(`${to}:${code}`); return { ok: true }; },
+    },
+    whatsAppProvider: {
+      name: 'capture',
+      configured: true,
+      send: async (to, code): Promise<WhatsAppSendResult> => { capture.whatsapp.push(`${to}:${code}`); return { ok: true }; },
+    },
     googleProvider: provider,
   });
   register(service);
+
+  // Verifier rejects (e.g. wrong audience) → redirect fails.
   const begin = service.googleBegin(WALLET);
   assert.ok(begin.ok);
   if (!begin.ok) return;
-  // First exchange fails → challenge consumed (single-use) but still present.
-  const failed = service.googleComplete(WALLET, { state: begin.state, nonce: begin.nonce, code: 'code' });
+  const failed = await service.googleOAuthRedirect({ state: begin.state, code: kit.devAuthorizationCode(begin.nonce) });
   assert.equal(failed.ok, false);
-  const reason = !failed.ok ? failed.reason : '';
-  if (reason === 'unauthorized') {
-    // Replaying the same state after a failed exchange must be rejected as a
-    // replay, even though the underlying exchange would now succeed.
-    const replay = service.googleComplete(WALLET, { state: begin.state, nonce: begin.nonce, code: 'code' });
-    assert.equal(replay.ok, false);
-    if (!replay.ok) assert.equal(replay.reason, 'replay');
-    assert.equal(attempt, 1, 'underlying exchange must not be retried on replay');
-  }
+  // complete() is impossible even with the right nonce — nothing was verified.
+  const soft = service.googleComplete(WALLET, { state: begin.state, nonce: begin.nonce });
+  assert.equal(soft.ok, false);
+  if (!soft.ok) assert.equal(soft.reason, 'unauthorized');
+  assert.equal(service.registrationState(WALLET)?.googleVerified, false);
+
+  // Verifier now accepts. The SAME state's one-shot authorization code was
+  // already redeemed by the failed attempt, so a fresh challenge + code is
+  // required — never a silent retry of the failed one.
+  setAccept(true);
+  const second = service.googleBegin(WALLET);
+  assert.ok(second.ok);
+  if (!second.ok) return;
+  assert.equal((await service.googleOAuthRedirect({ state: second.state, code: kit.devAuthorizationCode(second.nonce) })).ok, true);
+  assert.equal(service.googleComplete(WALLET, { state: second.state, nonce: second.nonce }).ok, true);
+  assert.equal(service.registrationState(WALLET)?.googleVerified, true);
 });
 
-test('google challenge expires after the TTL', () => {
+test('google challenge expires after the TTL', async () => {
   let now = 1_000_000;
-  const { service } = makeService({ now: () => now });
+  const { service, kit } = makeService({ now: () => now });
   register(service);
   const begin = service.googleBegin(WALLET);
   assert.ok(begin.ok);
   if (!begin.ok) return;
+  const code = kit.devAuthorizationCode(begin.nonce);
+  assert.equal((await service.googleOAuthRedirect({ state: begin.state, code })).ok, true);
   now += GOOGLE_STATE_TTL_MS + 1;
-  const r = service.googleComplete(WALLET, { state: begin.state, nonce: begin.nonce, code: 'code' });
+  const r = service.googleComplete(WALLET, { state: begin.state, nonce: begin.nonce });
   assert.equal(r.ok, false);
   if (!r.ok) assert.equal(r.reason, 'expired');
 });
 
-test('google challenge is bound to the initiating wallet only', () => {
-  const { service } = makeService();
+test('google challenge is bound to the initiating wallet only', async () => {
+  const { service, kit } = makeService();
   register(service);
   const begin = service.googleBegin(WALLET);
   assert.ok(begin.ok);
   if (!begin.ok) return;
-  const r = service.googleComplete(OTHER_WALLET, { state: begin.state, nonce: begin.nonce, code: 'code' });
+  const code = kit.devAuthorizationCode(begin.nonce);
+  assert.equal((await service.googleOAuthRedirect({ state: begin.state, code })).ok, true);
+  const r = service.googleComplete(OTHER_WALLET, { state: begin.state, nonce: begin.nonce });
   assert.equal(r.ok, false);
   if (!r.ok) assert.equal(r.reason, 'bad-state');
 });
 
 test('google provider is fail-closed when unconfigured', () => {
-  const { service } = makeService({ google: false });
+  // Build the service directly with an unconfigured Google provider.
+  const capture: Capture = { sms: [], whatsapp: [] };
+  const provider = new GoogleProvider(makeUnconfiguredConfig());
+  const service = new AccountService({
+    store: new InMemoryAccountStore(),
+    encryptionSecret: ENC,
+    otp: { hashSecret: 'reg-auth-test-otp-secret' },
+    smsProvider: {
+      name: 'capture',
+      configured: true,
+      send: async (to, code): Promise<SmsSendResult> => { capture.sms.push(`${to}:${code}`); return { ok: true }; },
+    },
+    whatsAppProvider: {
+      name: 'capture',
+      configured: true,
+      send: async (to, code): Promise<WhatsAppSendResult> => { capture.whatsapp.push(`${to}:${code}`); return { ok: true }; },
+    },
+    googleProvider: provider,
+  });
   // Registration itself fails closed when Google is unconfigured (no point
   // creating an account whose required factor can never pass).
   const reg = service.register(payload());
@@ -206,28 +284,42 @@ test('google provider is fail-closed when unconfigured', () => {
   const begin = service.googleBegin(WALLET);
   assert.equal(begin.ok, false);
   if (!begin.ok) assert.equal(begin.reason, 'unavailable');
-  // googleComplete reports unavailable, never acknowledging a code.
-  const r = service.googleComplete(WALLET, { state: 's', nonce: 'n', code: 'c' });
+  // googleComplete reports unavailable, never acknowledging a challenge.
+  const r = service.googleComplete(WALLET, { state: 's', nonce: 'n' });
   assert.equal(r.ok, false);
   if (!r.ok) assert.equal(r.reason, 'unavailable');
 });
 
+function makeUnconfiguredConfig(): GoogleProviderConfig {
+  return {
+    configured: false,
+    authorizeEndpoint: '',
+    tokenEndpoint: '',
+    userinfoEndpoint: '',
+    clientId: '',
+    clientSecret: '',
+    redirectUri: '',
+    tokenVerifier: null,
+    now: () => 1_000_000,
+  };
+}
+
 // ── SMS / WhatsApp OTP factors ─────────────────────────────────────
 
-test('SMS OTP verifies the SMS factor', () => {
+test('SMS OTP verifies the SMS factor', async () => {
   const { service, capture } = makeService();
   register(service);
-  const issue = service.issueSmsOtp(WALLET);
+  const issue = await service.issueSmsOtp(WALLET);
   assert.equal(issue.ok, true);
   const code = lastCode(capture, 'sms');
   assert.equal(service.verifySmsOtp(WALLET, code).ok, true);
   assert.equal(service.registrationState(WALLET)?.smsVerified, true);
 });
 
-test('WhatsApp OTP verifies the WhatsApp factor', () => {
+test('WhatsApp OTP verifies the WhatsApp factor', async () => {
   const { service, capture } = makeService();
   register(service);
-  const issue = service.issueWhatsappOtp(WALLET);
+  const issue = await service.issueWhatsappOtp(WALLET);
   assert.equal(issue.ok, true);
   const code = lastCode(capture, 'whatsapp');
   assert.equal(service.verifyWhatsappOtp(WALLET, code).ok, true);
@@ -250,8 +342,8 @@ test('a fresh account is `wallet` verified only and never reported complete', ()
   assert.equal(state.nextPendingFactor, 'google');
 });
 
-test('registration state machine reaches `complete` only after every factor', () => {
-  const { service, capture } = makeService();
+test('registration state machine reaches `complete` only after every factor', async () => {
+  const { service, capture, kit } = makeService();
   register(service);
 
   // Wallet only → pending google.
@@ -261,17 +353,18 @@ test('registration state machine reaches `complete` only after every factor', ()
   const begin = service.googleBegin(WALLET);
   assert.ok(begin.ok);
   if (begin.ok) {
-    assert.equal(service.googleComplete(WALLET, { state: begin.state, nonce: begin.nonce, code: 'c' }).ok, true);
+    assert.equal((await service.googleOAuthRedirect({ state: begin.state, code: kit.devAuthorizationCode(begin.nonce) })).ok, true);
+    assert.equal(service.googleComplete(WALLET, { state: begin.state, nonce: begin.nonce }).ok, true);
   }
   assert.equal(service.registrationState(WALLET)?.nextPendingFactor, 'sms');
 
   // SMS.
-  assert.equal(service.issueSmsOtp(WALLET).ok, true);
+  assert.equal((await service.issueSmsOtp(WALLET)).ok, true);
   assert.equal(service.verifySmsOtp(WALLET, lastCode(capture, 'sms')).ok, true);
   assert.equal(service.registrationState(WALLET)?.nextPendingFactor, 'whatsapp');
 
   // WhatsApp.
-  assert.equal(service.issueWhatsappOtp(WALLET).ok, true);
+  assert.equal((await service.issueWhatsappOtp(WALLET)).ok, true);
   assert.equal(service.verifyWhatsappOtp(WALLET, lastCode(capture, 'whatsapp')).ok, true);
 
   const state = service.registrationState(WALLET);

@@ -28,6 +28,7 @@ import {
 } from '../server/account/biometric';
 import { createHash } from 'node:crypto';
 import { AccountService } from '../server/account/service';
+import { configuredProviders } from './helpers/account-service-testing';
 import { InMemoryAccountStore } from '../server/account/store';
 import type { AccountRecord } from '../server/account/model';
 import {
@@ -143,9 +144,7 @@ test('D1: biometric feature fails closed when unconfigured', () => {
     store: new InMemoryAccountStore(),
     encryptionSecret: ENC,
     otp: { hashSecret: SECRET },
-    smsDelivery: { configured: true, send: () => undefined },
-    whatsappDelivery: { configured: true, send: () => undefined },
-    googleAuthenticator: { configured: true, complete: () => true },
+    ...configuredProviders(),
   });
   const wallet = '0x' + 'e'.repeat(64);
   assert.equal(svc.enrollmentStateFor(null), 'unavailable');
@@ -401,9 +400,7 @@ function makeHarness(): Harness {
     encryptionSecret: ENC,
     biometricEncryptionSecret: ENC,
     otp: { hashSecret: SECRET },
-    smsDelivery: { configured: true, send: () => undefined },
-    whatsappDelivery: { configured: true, send: () => undefined },
-    googleAuthenticator: { configured: true, complete: () => true },
+    ...configuredProviders(),
   });
   const keyResult = deriveBiometricKey();
   const key = keyResult!;
