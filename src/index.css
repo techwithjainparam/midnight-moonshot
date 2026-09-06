@@ -4342,6 +4342,17 @@ select.form-input {
   margin: 1rem 0;
 }
 
+/* Identity stages rendered as a contiguous second group within the same
+   stepper, visually separated from the auth factors above. */
+.registration-steps-identity {
+  margin: 0;
+  padding-top: 1.25rem;
+  border-top: 1px dashed var(--border-color, rgba(120, 130, 160, 0.25));
+}
+.registration-steps-identity .registration-step:nth-child(1) {
+  margin-top: 0.5rem;
+}
+
 .registration-step {
   display: flex;
   align-items: flex-start;

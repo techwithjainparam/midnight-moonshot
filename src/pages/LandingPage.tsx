@@ -54,6 +54,66 @@ export default function LandingPage() {
         </div>
       </section>
 
+      <section className="landing-flow" id="account-access">
+        <div className="landing-flow-inner">
+          <h2 className="landing-section-heading">Account Access</h2>
+          <p className="landing-section-desc">
+            Get started with a PRIESTATE account. Registration and login check
+            your wallet first, never create a duplicate, and keep the officer
+            process entirely separate.
+          </p>
+
+          <div className="benefits-grid">
+            <div className="benefit-card" role="button">
+              <div className="benefit-icon" aria-hidden="true">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+                  <circle cx="9" cy="7" r="4"/>
+                </svg>
+              </div>
+              <Link to="/register-account" className="benefit-title">
+                User Registration
+              </Link>
+              <p className="benefit-desc">
+                Create your account: wallet check, details, required factors,
+                then a live camera and location identity check.
+              </p>
+            </div>
+
+            <div className="benefit-card" role="button">
+              <div className="benefit-icon" aria-hidden="true">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                </svg>
+              </div>
+              <Link to="/login" className="benefit-title">
+                Login
+              </Link>
+              <p className="benefit-desc">
+                Sign in with your wallet, required factors, and password. A
+                separate face/liveness verification follows.
+              </p>
+            </div>
+
+            <div className="benefit-card" role="button">
+              <div className="benefit-icon" aria-hidden="true">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                </svg>
+              </div>
+              <Link to="/officer" className="benefit-title">
+                Officer Registration / Login
+              </Link>
+              <p className="benefit-desc">
+                A separate, authorized officer portal. Normal users are never
+                granted officer privileges.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section className="landing-flow" id="how-it-works">
         <div className="landing-flow-inner">
           <h2 className="landing-section-heading">How It Works</h2>

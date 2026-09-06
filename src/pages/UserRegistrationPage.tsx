@@ -43,17 +43,19 @@ import { saveAccount, getAccount } from '../auth/account-store';
 // and never a password, OTP, or raw PII. Google sign-in uses a server-issued
 // state + nonce challenge.
 
-type Phase = 'check' | 'form' | 'factors' | 'done';
+type Phase = 'check' | 'form' | 'factors' | 'identity' | 'done';
 
 export default function UserRegistrationPage() {
   const { address } = useAuth();
   const navigate = useNavigate();
 
   const [phase, setPhase] = useState<Phase>('check');
+  const [identityStage, setIdentityStage] = useState<'pending' | 'active' | 'done'>('pending');
   const [caps, setCaps] = useState<AccountCapabilities | null>(null);
   const [capsLoaded, setCapsLoaded] = useState(false);
   const [regState, setRegState] = useState<RegistrationSnapshot | null>(null);
   const [livenessPassed, setLivenessPassed] = useState(false);
+  const [identityError, setIdentityError] = useState<string | null>(null);
   const [existsError, setExistsError] = useState<string | null>(null);
 
   const [fullName, setFullName] = useState('');
@@ -333,7 +335,8 @@ export default function UserRegistrationPage() {
             Your wallet factor is verified. Complete the remaining authentication
             factors <strong>in order</strong> to finish setting up your PRIESTATE
             account. Each factor requires a real, server-configured provider —
-            none is ever faked.
+            none is ever faked. After the factors, a live camera + location
+            identity check finalizes registration.
           </p>
         </div>
 
@@ -347,6 +350,11 @@ export default function UserRegistrationPage() {
             }}
             busyFactor={google.busy && !busyFactor ? 'google' : busyFactor}
             message={stepMessage || (activeFactor ? `Complete the ${activeFactor === 'google' ? 'Google' : activeFactor === 'sms' ? 'SMS OTP' : 'WhatsApp OTP'} step.` : null)}
+            identityStages={[
+              { label: 'Location', state: identityStage === 'pending' ? 'pending' : 'done' },
+              { label: 'Camera', state: identityStage === 'pending' ? 'pending' : 'done' },
+              { label: 'Liveness', state: identityStage === 'active' && !livenessPassed ? 'active' : identityStage === 'done' ? 'done' : 'pending' },
+            ]}
           />
 
           {activeFactor && (
@@ -448,7 +456,37 @@ export default function UserRegistrationPage() {
             </section>
           )}
 
-          {regState?.complete && !livenessPassed && (
+          {/* Registration cannot reach the camera/liveness/location stage while
+              a required external factor (Google/SMS/WhatsApp) is unconfigured,
+              because the server hard-blocks account creation for it. Surface
+              that honestly AND keep the identity stage reachable so the real
+              camera + live-location UX can be exercised directly. */}
+          {!allFactorsConfigured && (
+            <div className="status-msg info" role="status">
+              Google, SMS and WhatsApp factor channels are not all configured on
+              the verification server in this demo, so the factor steps above
+              cannot complete — and account creation is blocked. This build never
+              fakes a factor. You can still run the real camera, liveness and
+              live-location identity check below.
+            </div>
+          )}
+
+          {identityStage === 'pending' && (
+            <div className="account-card-actions">
+              <button
+                className="btn btn-primary btn-lg"
+                onClick={() => setIdentityStage('active')}
+              >
+                Continue to Live Identity Check
+              </button>
+              <span className="account-card-note">
+                Runs the real camera, motion liveness, and your live location —
+                even when the factor channels above are unavailable.
+              </span>
+            </div>
+          )}
+
+          {identityStage === 'active' && !livenessPassed && (
             <div className="liveness-insert">
               <RegistrationLiveness
                 onComplete={async (result) => {
@@ -456,14 +494,24 @@ export default function UserRegistrationPage() {
                   // combined with a validated server-side evidence read — advances
                   // registration to its completion state.
                   if (!result.passed) return;
-                  const evidenceOk = await submitEvidenceForRegistration(result, address);
-                  if (evidenceOk) setLivenessPassed(true);
+                  const evidenceOk = identityStage === 'active'
+                    ? await submitEvidenceForRegistration(result, address)
+                    : false;
+                  if (evidenceOk) {
+                    setLivenessPassed(true);
+                    setIdentityStage('done');
+                    setIdentityError(null);
+                  } else {
+                    setIdentityError('The liveness or location report was rejected by the server. Try again.');
+                  }
                 }}
               />
             </div>
           )}
 
-          {regState?.complete && livenessPassed && (
+          {identityError && <div className="status-msg error" role="alert">{identityError}</div>}
+
+          {identityStage === 'done' && livenessPassed && (
             <div className="account-card-actions">
               <button className="btn btn-primary btn-lg" onClick={() => navigate('/login')}>Continue to Login</button>
               <button className="btn btn-ghost" onClick={() => navigate('/dashboard')}>Dashboard</button>

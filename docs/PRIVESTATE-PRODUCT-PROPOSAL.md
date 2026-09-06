@@ -213,7 +213,7 @@ What currently exists:
 
 - **Deployed frontend** — live at https://priestate.vercel.app (Vercel; reachable).
 - **Midnight Preprod deployment** — contract address `e5bddf519efe1ed61bf59c344e49c37340860fb99a60543056e97456224b5256` recorded in `.midnight-state.json` with a deployment-proof screenshot.
-- **Automated tests** — currently **318 passing** (26 test files) covering account, auth, privacy, liveness, face-verification, registration, registry, and officer paths (verified via `npm test`).
+- **Automated tests** — currently **407 tests passing** covering account, auth, privacy, liveness, face-verification, registration, registry, and officer paths (verified via `npm test`).
 - **CI pipeline** — `.github/workflows/ci.yml` runs compact compile, copy-circuits, typecheck, tests, and a production build on push/PR; README shows a CI badge.
 - **Demo video (Level 2)** — https://youtu.be/UQwleyyFHqQ.
 
@@ -222,7 +222,7 @@ Known current limitations (accurate, not hidden):
 - Face verification is **provider-ready / not available** — no real CV, no legitimate biometric reference, no fabricated matches.
 - Aadhaar verification is **not production-integrated**.
 - Officer authorization is **demo-only**.
-- The Level 3 backend server is not confirmed deployed; server-side Level 3 flows are demonstrated by automated tests rather than a live hosted instance.
+- The Level 3 backend server is **deployed on Railway** at https://backend-production-25553.up.railway.app and health-verified (HTTP 200); the live Vercel frontend at https://priestate.vercel.app is connected to it via `VITE_VERIFICATION_API_URL`. Server-side Level 3 flows therefore run against the live hosted instance, not only automated tests.
 - Google / SMS / WhatsApp live delivery credentials are not shipped.
 
 ---

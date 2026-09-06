@@ -6,6 +6,8 @@ import {
   type RegistrationFactor,
 } from '../auth/account-types';
 
+export type RegistrationStepState = 'done' | 'active' | 'pending' | 'unavailable';
+
 // PRIESTATE — Registration authentication stepper (Level 3 Part 3).
 //
 // Presents the sequential registration authentication factors
@@ -23,20 +25,25 @@ interface RegistrationStepperProps {
   readonly busyFactor?: RegistrationFactor | null;
   /** Optional inline message for the current step (errors/cooldown/notes). */
   readonly message?: string | null;
+  /**
+   * Optional subsequent identity stages (password/camera/liveness/location/
+   * completion) rendered after the authentication factors so the complete
+   * registration journey is visible as one sequential stepper.
+   */
+  readonly identityStages?: ReadonlyArray<{ label: string; state: RegistrationStepState }>;
 }
-
-type StepState = 'done' | 'active' | 'pending' | 'unavailable';
 
 export default function RegistrationStepper({
   snapshot,
   configured,
   busyFactor = null,
   message,
+  identityStages,
 }: RegistrationStepperProps) {
   const states = snapshotFactorState(snapshot);
   const complete = Boolean(snapshot && snapshot.complete);
 
-  const stepState = (f: RegistrationFactor): StepState => {
+  const stepState = (f: RegistrationFactor): RegistrationStepState => {
     if (f === 'wallet') {
       // Wallet is verified the moment a wallet is connected for an account.
       return states.wallet ? 'done' : 'active';
@@ -77,6 +84,33 @@ export default function RegistrationStepper({
           );
         })}
       </div>
+
+      {identityStages && identityStages.length > 0 && (
+        <div className="registration-steps registration-steps-identity">
+          {identityStages.map((s, i) => {
+            const cls = `registration-step ${s.state}`;
+            const isLast = i === identityStages.length - 1;
+            return (
+              <div key={s.label} className={cls}>
+                <div className="registration-step-indicator">
+                  <div className="registration-step-dot">
+                    {s.state === 'done' && (
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                    )}
+                    {s.state === 'active' && <div className="registration-step-pulse" />}
+                    {s.state === 'unavailable' && <span className="registration-step-x">×</span>}
+                    {s.state === 'pending' && <span className="registration-step-num">{i + 1}</span>}
+                  </div>
+                  {!isLast && <div className="registration-step-line" />}
+                </div>
+                <span className="registration-step-label">{s.label}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {complete && (
         <div className="status-msg success" role="status">

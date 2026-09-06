@@ -327,17 +327,6 @@ export default function LoginPage() {
           message={factorError}
         />
 
-        {/* ── Subsequent identity stage: face verification (Part 6) ─── */}
-        <section className="account-section">
-          <h2 className="account-section-title">Identity verification (face)</h2>
-          <p className="account-section-desc">
-            After the login factors, verifying your identity with your face is a
-            separate, explicit step. It is independent of the password login below and is
-            never silently treated as a login factor.
-          </p>
-          <LoginFaceVerification snapshot={faceSnap} />
-        </section>
-
         {/* ── Pending factors ─────────────────────────────────────── */}
         {!allReady && nextFactor === 'google' && (
           <section className="account-section">
@@ -456,6 +445,21 @@ export default function LoginPage() {
               />
               <span className="form-hint">Verified against a salted scrypt hash on the server — never stored as plaintext.</span>
             </div>
+          </section>
+        )}
+
+        {/* ── Subsequent identity stage: face verification (Part 6) ───
+            Runs AFTER the password completes the five-factor login, as a
+            separate explicit identity step — never a login factor. */}
+        {allReady && phase === 'complete' && (
+          <section className="account-section">
+            <h2 className="account-section-title">Identity verification (face)</h2>
+            <p className="account-section-desc">
+              With your login factors and password complete, verifying your
+              identity with your face is the final, separate step. It honestly
+              fails closed when no real face-verification provider is available.
+            </p>
+            <LoginFaceVerification snapshot={faceSnap} />
           </section>
         )}
 

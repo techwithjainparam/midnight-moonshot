@@ -16,22 +16,39 @@ propertyValue >= eligibilityThreshold
 
 Only the eligibility result is disclosed publicly on the ledger. The property value stays private forever.
 
-## Status — Level 2
+## Status — Level 3
+
+Classification used throughout this section:
+
+* **REAL** — fully implemented, verified by tests, and shipping in this build.
+* **PROVIDER-READY** — the factor/state machine and server enforcement are implemented, but live delivery still requires external provider credentials (not shipped).
+* **DEMO-ONLY** — present to shape the UI/UX only; not a real security or identity boundary.
+* **NOT AVAILABLE** — reported unavailable in the current build; no fake success.
 
 | Stage | Status |
 | ----- | ------ |
-| Frontend foundation (Vite + React + TypeScript) | Done |
-| Compact PRIESTATE contract | Done |
-| Midnight SDK dependencies | Done |
-| Contract compilation + managed artifacts | Done |
-| Test suite (88 tests) | Done |
-| Wallet connection (DApp Connector v4.x) | Done |
-| Circuit frontend integration (ZK proof flow) | Done |
-| Contact verification (Email OTP + Aadhaar KYC) | Done |
-| Preprod deployment script | Done |
-| Browser ZK config (FetchZkConfigProvider) | Done |
-| On-chain result capture & display | Done |
-| Production build | Done |
+| Midnight privacy / ZK (Compact circuit, private property value, Boolean result only) | REAL |
+| On-chain property registration lifecycle (`PENDING → APPROVED/REJECTED` + officer authorization) | REAL |
+| Midnight wallet (DApp Connector v4.x, join by fixed preprod address) | REAL |
+| Authentication (server-authoritative account sessions) | REAL |
+| Registration / login | REAL |
+| Registration liveness (motion-only) | FOUNDATION (motion liveness only, not CV identity) |
+| Live location | REAL (browser geolocation + verification) |
+| Biometric verification (face matching) | PROVIDER-READY / NOT AVAILABLE (no real CV provider or reference store bundled) |
+| Google factor | PROVIDER-READY (needs live OAuth credentials) |
+| SMS / WhatsApp OTP factors | PROVIDER-READY (needs live gateway credentials) |
+| Aadhaar / KYC | NOT AVAILABLE / PROVIDER-READY architecture (no UIDAI-authorized provider connected) |
+| Railway backend (verification API) | REAL (deployed, health 200) |
+| Vercel frontend | REAL (deployed, live) |
+| CI/CD (GitHub Actions: compile, typecheck, tests, build) | REAL (green) |
+| Automated tests | REAL (407 tests passing) |
+| Privacy / security model (AES-256-GCM at rest, fail-closed, PII/biometric off-ledger) | REAL |
+
+**Live deployments:**
+* Vercel frontend: https://priestate.vercel.app
+* Railway backend: https://backend-production-25553.up.railway.app
+
+No Google, SMS, WhatsApp, Aadhaar/KYC, or production biometric capability is claimed as live; each is labelled PROVIDER-READY or NOT AVAILABLE above because live provider credentials are not configured.
 
 ## Live Demo
 
@@ -143,7 +160,7 @@ midnight-moonshot/
 │   ├── browser-manager.ts         # BrowserPriestateManager
 │   ├── contract-address.ts        # contract address resolution
 │   └── in-memory-private-state-provider.ts
-├── tests/                         # 88 tests (compile, wiring, result, privacy, etc.)
+├── tests/                         # 407 tests passing (compile, wiring, result, privacy, etc.)
 ├── public/
 │   ├── keys/                      # ZK artifacts (copied by copy-circuits)
 │   └── zkir/
