@@ -117,7 +117,7 @@ function fakeGeo(): {
 }
 
 function pos(over: Partial<{ lat: number; lon: number; acc: number; ts: number }> = {}): GeolocationPosition {
-  const o = { lat: 12.9716, lon: 77.5946, acc: 20, ts: NOW, ...over };
+  const o = { lat: 12.9716, lon: 77.5946, acc: 20, ts: Date.now(), ...over };
   return {
     coords: { latitude: o.lat, longitude: o.lon, accuracy: o.acc, altitude: null, heading: null },
     timestamp: o.ts,

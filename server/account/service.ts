@@ -50,7 +50,7 @@ import {
   maskAadhaar,
   rejectIdentityEvidence,
 } from './model.js';
-import { toPublicAccountView } from './model.js';
+import { maskEmail, passwordIssues, toPublicAccountView } from './model.js';
 import {
   hashPassword,
   verifyPassword,
@@ -241,11 +241,15 @@ export class AccountService {
     if (!parsed.ok) return { ok: false, reason: 'invalid-input' };
 
     const { input } = parsed;
+    // The legacy register path is wallet-required; parseAccountRegistration
+    // already validated the 64-hex wallet, so this narrows the type.
+    const walletAddress = input.walletAddress;
+    if (!walletAddress) return { ok: false, reason: 'invalid-input' };
     if (!this.encryptionKey) return { ok: false, reason: 'unavailable' };
     if (!this.allFactorsConfigured) {
       return { ok: false, reason: 'unavailable' };
     }
-    if (this.store.getByWallet(input.walletAddress)) {
+    if (this.store.getByWallet(walletAddress)) {
       return { ok: false, reason: 'already-registered' };
     }
 
@@ -270,7 +274,7 @@ export class AccountService {
 
     const record: AccountRecord = {
       accountId,
-      walletAddress: input.walletAddress,
+      walletAddress,
       passwordHash: hash,
       passwordSalt: salt,
       piiCipherText: encryptPII(this.encryptionKey, pii),
@@ -280,12 +284,15 @@ export class AccountService {
       whatsappOtpVerified: false,
       googleLinked: false,
       identityVerified: false,
+      emailVerified: false,
+      emailVerifiedAt: null,
       createdAt: Date.now(),
       biometricReferenceCipherText: null,
       biometricReferenceVersion: null,
       biometricEnrolledAt: null,
       biometricConsentAt: null,
       biometricRevokedAt: null,
+      identityEvidenceAcceptedAt: null,
     };
 
     this.store.create(record);
@@ -322,7 +329,7 @@ export class AccountService {
     if (!record) return { ok: false, reason: 'not-found' };
     const pii = this.decryptPii(walletAddress);
     if (!pii.ok || !('pii' in pii)) return { ok: false, reason: 'not-found' };
-    const key = OtpService.keyFor('sms', record.walletAddress);
+    const key = OtpService.keyFor('sms', walletAddress);
     const begun = this.smsOtp.beginIssue(key);
     if (!begun.ok) return begun;
     const delivery = await this.smsProvider.send(pii.pii.mobileE164, begun.code);
@@ -344,7 +351,7 @@ export class AccountService {
     if (!this.smsConfigured) return { ok: false, reason: 'unavailable' };
     const record = this.store.getByWallet(walletAddress);
     if (!record) return { ok: false, reason: 'not-found' };
-    const key = OtpService.keyFor('sms', record.walletAddress);
+    const key = OtpService.keyFor('sms', walletAddress);
     const result = this.smsOtp.verify(key, code);
     if (result.ok) {
       this.store.update(walletAddress, { smsOtpVerified: true });
@@ -358,7 +365,7 @@ export class AccountService {
     if (!record) return { ok: false, reason: 'not-found' };
     const pii = this.decryptPii(walletAddress);
     if (!pii.ok || !('pii' in pii)) return { ok: false, reason: 'not-found' };
-    const key = OtpService.keyFor('whatsapp', record.walletAddress);
+    const key = OtpService.keyFor('whatsapp', walletAddress);
     const begun = this.whatsappOtp.beginIssue(key);
     if (!begun.ok) return begun;
     const delivery = await this.whatsAppProvider.send(pii.pii.mobileE164, begun.code);
@@ -380,7 +387,7 @@ export class AccountService {
     if (!this.whatsappConfigured) return { ok: false, reason: 'unavailable' };
     const record = this.store.getByWallet(walletAddress);
     if (!record) return { ok: false, reason: 'not-found' };
-    const key = OtpService.keyFor('whatsapp', record.walletAddress);
+    const key = OtpService.keyFor('whatsapp', walletAddress);
     const result = this.whatsappOtp.verify(key, code);
     if (result.ok) {
       this.store.update(walletAddress, { whatsappOtpVerified: true });
@@ -555,8 +562,10 @@ export class AccountService {
    *     re-enrollment goes through the replace flow),
    *   * the account.has completed registration identity evidence (Part 7
    *     liveness+location), tracked via `recordIdentityEvidence` having been
-   *     accepted before this call. We enforce it by requiring `provenLiveness`
-   *     — a boolean the server set itself when it accepted identity evidence.
+   *     accepted before this call. We enforce it by requiring the
+   *     server-set `identityEvidenceAcceptedAt` timestamp to be present on the
+   *     account — recorded by the server itself when it validated the evidence.
+   *     A bare client boolean can never satisfy it.
    *
    * Issues a single-use, short-TTL, wallet-bound enrollment token. Returns the
    * token + TTL for the client to use in the complete call (it never self-
@@ -572,6 +581,14 @@ export class AccountService {
     if (!record) return { ok: false, reason: 'not-found' };
     const state = this.enrollmentStateFor(record);
     if (state === 'enrolled' || state === 'revoked') {
+      return { ok: false, reason: 'bad-state' };
+    }
+    // Part 9 identity-evidence gate: enrollment is only reachable once the
+    // server itself accepted the registration liveness+location evidence
+    // (`recordIdentityEvidence`). This timestamp is set server-side only — a
+    // bare client boolean can never satisfy it, and no demo/fabricated
+    // enrollment can bypass it.
+    if (!record.identityEvidenceAcceptedAt) {
       return { ok: false, reason: 'bad-state' };
     }
     const s = this.biometricSessions.issue({
@@ -851,8 +868,10 @@ export class AccountService {
     const now = Date.now();
     const denial = rejectIdentityEvidence(evidence, now);
     if (denial) return { ok: false, reason: 'identity-evidence-rejected' };
-    // Evidence past structural/freshness/range validation; we deliberately do
-    // NOT persist raw coordinates or any biometric marker.
+    // Evidence passed structural/freshness/range validation. Persist ONLY the
+    // acceptance timestamp — never raw coordinates or any biometric marker.
+    // Biometric enrollment is gated on this having been set.
+    this.store.update(walletAddress, { identityEvidenceAcceptedAt: now });
     return { ok: true, accepted: true, receivedAtMs: now };
   }
 
@@ -861,8 +880,10 @@ export class AccountService {
   /**
    * Compulsory multi-factor login. Every factor is REQUIRED (not a menu of
    * alternatives): wallet address must match, password must verify, and the
-   * account must already have passed SMS OTP, WhatsApp OTP, Google, and
-   * identity verification. Returns a success session only when all hold.
+   * account must already have passed SMS OTP, WhatsApp OTP, and identity
+   * verification. Google, when linked, is an OPTIONAL extra factor and is NOT
+   * part of the required chain. Returns a success session only when all
+   * required factors hold.
    */
   login(input: {
     walletAddress: string;
@@ -874,7 +895,6 @@ export class AccountService {
       return { ok: false, reason: 'unauthorized' };
     }
     if (!record.identityVerified) return { ok: false, reason: 'identity-verification-required' };
-    if (!record.googleLinked) return { ok: false, reason: 'factor-missing' };
     if (!record.smsOtpVerified) return { ok: false, reason: 'factor-missing' };
     if (!record.whatsappOtpVerified) return { ok: false, reason: 'factor-missing' };
     return { ok: true, session: { accountId: record.accountId } };
@@ -892,9 +912,168 @@ export class AccountService {
     return { ok: true, pii };
   }
 
+  /**
+   * Locate an account whose VERIFIED registration email matches (case-
+   * insensitive). Used ONLY by the forgot-password flow; the caller keeps
+   * responses uniform so this never becomes an account-existence oracle.
+   */
+  findAccountByEmail(
+    email: string,
+  ): { ok: true; walletAddress: string; maskedEmail: string; accountId: string } | null {
+    if (!this.encryptionKey) return null;
+    const needle = email.trim().toLowerCase();
+    if (!needle) return null;
+    for (const record of this.store.list()) {
+      if (!record.emailVerified) continue;
+      // Forgot-password is wallet-bound; a wallet-less account can't be found here.
+      if (record.walletAddress === null) continue;
+      const pii = decryptPII(this.encryptionKey, record.piiCipherText) as AccountRecordPii | null;
+      if (!pii?.email) continue;
+      if (pii.email.trim().toLowerCase() !== needle) continue;
+      return {
+        ok: true,
+        walletAddress: record.walletAddress,
+        maskedEmail: maskEmail(pii.email),
+        accountId: record.accountId,
+      };
+    }
+    return null;
+  }
+
+  /**
+   * Server-authoritative password reset (forgot-password flow). The caller has
+   * ALREADY verified email + liveness + biometric ownership on the server. The
+   * new password is validated against the account's own PII, re-hashed with a
+   * fresh salt (salted scrypt), and persisted. Sessions for the account are
+   * NOT destroyed here (the session service lives in the HTTP layer) — the
+   * route destroys them after a success.
+   */
+  resetPassword(walletAddress: string, newPassword: string): AccountResult {
+    const record = this.store.getByWallet(walletAddress);
+    if (!record) return { ok: false, reason: 'not-found' };
+    if (!this.encryptionKey) return { ok: false, reason: 'unavailable' };
+    const pii = decryptPII(this.encryptionKey, record.piiCipherText) as AccountRecordPii | null;
+    const issues = passwordIssues(newPassword, {
+      mobile: pii?.mobileE164 ?? '',
+      aadhaarNumber: pii?.aadhaarNumber ?? '',
+      fullName: pii?.fullName ?? '',
+    });
+    if (issues.length > 0) {
+      return { ok: false, reason: 'invalid-input' };
+    }
+    const { hash, salt } = hashPassword(newPassword);
+    const updated = this.store.update(walletAddress, { passwordHash: hash, passwordSalt: salt });
+    return { ok: true, view: toPublicAccountView(updated ?? record) };
+  }
+
   /** Normalize/validate a mobile on the server (mirror of client checks). */
   normalizeMobile(raw: string): string | null {
     return normalizeIndianMobile(raw);
+  }
+
+  // ── Registration-finalization (Part 1: new flow) ──────────────────
+
+  /**
+   * Encrypt a JSON value at rest with the SAME AES-256-GCM key that protects
+   * account PII. Used by the registration service for session-stage encrypted
+   * material (personal profile, Aadhaar OCR extraction). Returns null when the
+   * account feature is unconfigured (fail closed — never plaintext at rest).
+   */
+  encryptAtRest(value: unknown): string | null {
+    if (!this.encryptionKey) return null;
+    return encryptPII(this.encryptionKey, value);
+  }
+
+  /** Decrypt a blob produced by `encryptAtRest`. Returns null on any failure. */
+  decryptAtRest(blob: string): unknown {
+    if (!this.encryptionKey) return null;
+    return decryptPII(this.encryptionKey, blob);
+  }
+
+  /**
+   * Finalization entry point used by the registration flow (Part 1).
+   *
+   * The registration service has ALREADY performed every required stage
+   * server-side (personal details, Aadhaar document OCR, email/SMS/WhatsApp
+   * OTP verification, Aadhaar-mobile linkage, strong password, photo check,
+   * real liveness challenges and live location evidence). It hands this method
+   * ONLY the derived material — a pre-hashed password and an already-encrypted
+   * PII blob — so all crypto stays in this module. The account is created with
+   * `identityVerified=false` (biometric enrollment happens next via the
+   * authenticated flow) but with the identity-evidence acceptance timestamp
+   * recorded (the server validated that evidence during registration).
+   */
+  createAccountFromFinalizedRegistration(input: {
+    readonly walletAddress: string | null;
+    readonly piiCipherText: string;
+    readonly maskedMobile: string;
+    readonly maskedAadhaar: string;
+    readonly passwordHash: string;
+    readonly passwordSalt: string;
+    readonly emailVerified: boolean;
+    readonly emailVerifiedAt: number | null;
+    readonly identityEvidenceAcceptedAt: number;
+  }): AccountResult {
+    if (!this.encryptionKey) return { ok: false, reason: 'unavailable' };
+    if (input.walletAddress !== null && this.store.getByWallet(input.walletAddress)) {
+      return { ok: false, reason: 'already-registered' };
+    }
+    const record: AccountRecord = {
+      accountId: randomBytes(12).toString('hex'),
+      walletAddress: input.walletAddress,
+      passwordHash: input.passwordHash,
+      passwordSalt: input.passwordSalt,
+      piiCipherText: input.piiCipherText,
+      maskedMobile: input.maskedMobile,
+      maskedAadhaar: input.maskedAadhaar,
+      smsOtpVerified: true, // verified during registration
+      whatsappOtpVerified: true, // verified during registration
+      googleLinked: false,
+      identityVerified: false, // completed next via biometric enrollment
+      emailVerified: input.emailVerified,
+      emailVerifiedAt: input.emailVerifiedAt,
+      createdAt: Date.now(),
+      biometricReferenceCipherText: null,
+      biometricReferenceVersion: null,
+      biometricEnrolledAt: null,
+      biometricConsentAt: null,
+      biometricRevokedAt: null,
+      identityEvidenceAcceptedAt: input.identityEvidenceAcceptedAt,
+    };
+    this.store.create(record);
+    return { ok: true, view: toPublicAccountView(record) };
+  }
+
+  /**
+   * Bind a real Midnight wallet to an account that was registered wallet-free.
+   *
+   * Rules:
+   *   * an invalid wallet address is rejected (`invalid-input`),
+   *   * a wallet owned by ANOTHER account is refused (`already-registered`),
+   *   * repeating the SAME wallet is idempotent (returns the account),
+   *   * a DIFFERENT wallet cannot replace an already-associated one
+   *     (`bad-state`) — the only safe path is account-level revocation,
+   *   * otherwise the wallet is bound and the fresh view is returned.
+   */
+  associateWallet(accountId: string, walletAddress: string): AccountResult {
+    if (!/^0x[a-fA-F0-9]{64}$/.test(walletAddress)) {
+      return { ok: false, reason: 'invalid-input' };
+    }
+    const account = this.store.getById(accountId);
+    if (!account) return { ok: false, reason: 'not-found' };
+    if (account.walletAddress !== null && account.walletAddress !== walletAddress) {
+      return { ok: false, reason: 'bad-state' };
+    }
+    const owner = this.store.getByWallet(walletAddress);
+    if (owner && owner.accountId !== accountId) {
+      return { ok: false, reason: 'already-registered' };
+    }
+    if (account.walletAddress === walletAddress) {
+      return { ok: true, view: toPublicAccountView(account) };
+    }
+    const updated = this.store.setWalletAddress(accountId, walletAddress);
+    if (!updated) return { ok: false, reason: 'not-found' };
+    return { ok: true, view: toPublicAccountView(updated) };
   }
 }
 
@@ -904,4 +1083,6 @@ export interface AccountRecordPii {
   readonly addressOnAadhaar?: string;
   readonly dateOfBirth: string;
   readonly mobileE164: string;
+  /** Verified (post-OTP) registration email address. */
+  readonly email?: string;
 }

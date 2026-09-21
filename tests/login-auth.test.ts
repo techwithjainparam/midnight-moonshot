@@ -198,6 +198,28 @@ async function fullyRegistered(base: string, env: { capture: Capture; kit: Googl
 
   // Part 8: identity verification is now real server-side biometric enrollment
   // (single-use token + real embedding), NOT a bare `confirmed:true` flag.
+  // Part 9: enrollment is gated on the server-authoritative registration
+  // identity evidence (liveness + live location) having been accepted first.
+  const evidence = await resp(
+    base,
+    '/api/v1/account/identity-evidence',
+    {
+      identityEvidence: {
+        context: 'registration',
+        livenessPassed: true,
+        location: {
+          latitude: 19.07,
+          longitude: 72.87,
+          accuracyMeters: 12,
+          timestampMs: Date.now(),
+          nonce: 'test-nonce',
+        },
+      },
+    },
+    `priestate_sid=${sid}`,
+  );
+  assert.equal(evidence.status, 200, 'identity evidence must be accepted');
+
   const begin = await resp(base, '/api/v1/account/biometric/enrollment/begin', {}, `priestate_sid=${sid}`);
   assert.equal(begin.status, 200);
   const token = begin.body.token as string;
@@ -219,7 +241,7 @@ test('deriveLoginState yields null for a missing account', () => {
   assert.equal(deriveLoginState(null), null);
 });
 
-test('deriveLoginState orders next pending factor wallet→google→sms→whatsapp', () => {
+test('deriveLoginState orders next pending factor wallet→sms→whatsapp (google optional)', () => {
   const base = {
     accountId: 'a1',
     walletAddress: WALLET,
@@ -231,12 +253,10 @@ test('deriveLoginState orders next pending factor wallet→google→sms→whatsa
     identityVerified: false,
     createdAt: 0,
   } as unknown as Parameters<typeof deriveLoginState>[0];
-  assert.equal(deriveLoginState(base)?.nextPendingFactor, 'google');
-  const google = { ...base!, googleLinked: true } as typeof base;
-  const afterGoogle = deriveLoginState(google);
-  assert.equal(afterGoogle?.googleVerified, true);
-  assert.equal(afterGoogle?.nextPendingFactor, 'sms');
-  const sms = { ...google!, smsOtpVerified: true } as typeof base;
+  // Google is OPTIONAL and therefore NOT the next pending required factor.
+  assert.equal(deriveLoginState(base)?.nextPendingFactor, 'sms');
+  assert.equal(deriveLoginState(base)?.googleVerified, false);
+  const sms = { ...base!, smsOtpVerified: true } as typeof base;
   assert.equal(deriveLoginState(sms)?.nextPendingFactor, 'whatsapp');
   const all = { ...sms!, whatsappOtpVerified: true } as typeof base;
   const ready = deriveLoginState(all);
@@ -294,7 +314,7 @@ test('factors must be completed in order: gated login state machine', async (t) 
   assert.equal(st.body.exists, true);
   const login = st.body.login as Record<string, unknown>;
   assert.equal(login.allFactorsReady, false);
-  assert.ok(['google', 'sms', 'whatsapp'].includes(String(login.nextPendingFactor)));
+  assert.ok(['sms', 'whatsapp'].includes(String(login.nextPendingFactor)));
 
   // Completing a LATER factor before an EARLIER one is impossible at the model
   // level; the login call itself still fails and mints no session while

@@ -9,10 +9,11 @@
     "compile": "compact compile contracts/priestate.compact contracts/managed/priestate",
     "copy-circuits": "tsx scripts/copy-circuit-files.ts",
     "copy-face-models": "tsx scripts/copy-face-models.ts",
-    "predev": "npm run compile && npm run copy-circuits && npm run copy-face-models",
+    "copy-hand-models": "tsx scripts/copy-hand-models.ts",
+    "predev": "npm run compile && npm run copy-circuits && npm run copy-face-models && npm run copy-hand-models",
     "dev": "vite",
     "verify-server": "tsx server/index.ts",
-    "prebuild": "npm run compile && npm run copy-circuits && npm run copy-face-models",
+    "prebuild": "npm run compile && npm run copy-circuits && npm run copy-face-models && npm run copy-hand-models",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
@@ -26,6 +27,7 @@
     "proof-server:stop": "docker compose down"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "^1.0.1",
     "@midnight-ntwrk/compact-runtime": "0.16.0",
     "@midnight-ntwrk/dapp-connector-api": "^4.0.1",
     "@midnight-ntwrk/midnight-js-contracts": "4.1.1",

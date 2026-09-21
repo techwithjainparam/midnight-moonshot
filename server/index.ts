@@ -65,6 +65,13 @@ import type { AccountStore } from './account/store';
 import { openDatabase } from './account/db';
 import { SqliteAccountStore } from './account/sqlite-store';
 import { SessionService } from './account/session';
+import {
+  OFFICER_SESSION_COOKIE_NAME,
+  OfficerService,
+  SqliteOfficerStore,
+  type OfficerStore,
+  type PublicOfficerView,
+} from './account/officer';
 import type { IdentityEvidence } from './account/model';
 import type { FaceEmbedding } from './account/biometric';
 import { createSmsProviderFromConfig, type SmsProvider } from './account/sms-provider';
@@ -82,6 +89,20 @@ import {
 import type { TokenVerifier } from './lib/id-token-verifier';
 import { createOidcVerifier } from './lib/identity-provider-oidc';
 import { OAuthStateSession } from './lib/oauth-state';
+import { parseMultipart } from './lib/multipart';
+import { RegistrationService, type RegistrationResult } from './registration/service';
+import {
+  SqliteRegistrationSessionStore,
+  SqliteForgotPasswordSessionStore,
+  type RegistrationSessionStore,
+  type ForgotPasswordSessionStore,
+} from './registration/session-store';
+import { ForgotPasswordService, type ForgotPasswordResult } from './registration/forgot-password';
+import { InMemoryLivenessService, type LivenessService } from './registration/liveness';
+import { createPincodeProviderFromConfig, type PincodeProvider } from './services/pincode-provider';
+import { NominatimReverseGeocoder, type GeocodingProvider } from './services/geocoding-provider';
+import { createDisposableEmailChecker, type DisposableEmailChecker } from './services/disposable-email';
+import { SurepassAadhaarOcrProvider, type AadhaarOcrProvider } from './services/aadhaar-ocr-provider';
 
 export interface VerificationServerOverrides {
   /** Test seam: replace SMTP delivery with a capture transport. */
@@ -138,10 +159,27 @@ export interface VerificationServerOverrides {
   readonly sessionService?: SessionService;
   /** Test seam: SQLite database handle (skips openDatabase when set). */
   readonly db?: import('better-sqlite3').Database;
+  /** Test seam: replace the officer-credential persistence backend. */
+  readonly officerStore?: OfficerStore;
+  /** Test seam: override the one-time officer commissioning code (empty ⇒ unavailable). */
+  readonly officerRegistrationCode?: string;
+  /** Test seam: provide a pre-built OfficerService. */
+  readonly officerService?: OfficerService;
+  /** Test seam: registration-stack store (session persistence). */
+  readonly registrationStore?: RegistrationSessionStore;
+  /** Test seam: forgot-password session store. */
+  readonly forgotPasswordStore?: ForgotPasswordSessionStore;
+  /** Test seam: pre-built RegistrationService (skips provider wiring in tests). */
+  readonly registrationService?: RegistrationService;
+  /** Test seam: pre-built ForgotPasswordService. */
+  readonly forgotPasswordService?: ForgotPasswordService;
+  /** Test seam: Aadhaar document OCR adapter (vs. the config-built Surepass one). */
+  readonly registrationAadhaarOcrProvider?: AadhaarOcrProvider;
+  /** Test seam: disposable-email checker. */
+  readonly registrationDisposableEmailChecker?: DisposableEmailChecker;
+  /** Test seam: liveness challenge engine (deterministic in tests). */
+  readonly registrationLiveness?: LivenessService;
 }
-
-const DEV_FALLBACK_OTP_SECRET =
-  'priestate-insecure-development-otp-secret-0123456789';
 
 interface BuiltStack {
   readonly server: http.Server;
@@ -157,9 +195,20 @@ export function createVerificationServer(
 ): BuiltStack {
   // ── Providers ──────────────────────────────────────────────────────
 
+  // The OTP hash secret is a HARD security dependency: without it, every OTP
+  // feature must not start at all (fail closed), never fall back to a baked-in
+  // development secret. Production must set OTP_HASH_SECRET.
+  if (!config.otp.hashSecret || config.otp.hashSecret.length < 16) {
+    throw new Error(
+      'OTP_HASH_SECRET must be configured (at least 16 characters). ' +
+        'Refusing to start the verification server with an insecure fallback.',
+    );
+  }
+  const otpHashSecret = config.otp.hashSecret;
+
   const mailer: Mailer | null = overrides.mailer ?? createSmtpMailer(config);
   const otpService = new OtpService({
-    hashSecret: config.otp.hashSecret || DEV_FALLBACK_OTP_SECRET,
+    hashSecret: otpHashSecret,
     ttlMs: config.otp.ttlMs,
     maxAttempts: config.otp.maxAttempts,
     resendCooldownMs: config.otp.resendCooldownMs,
@@ -208,6 +257,26 @@ export function createVerificationServer(
       secure: config.account?.sessionSecure ?? true,
       ttlMs: config.account?.sessionTtlMs,
       sameSite: config.account?.sessionSameSite,
+    });
+
+  // ── Server-backed officer credential (single commissioned officer) ────
+  // A SEPARATE `priestate_officer_sid` HttpOnly cookie keeps the officer
+  // identity distinct from any citizen session on the same browser. Sessions
+  // live in the `officer_sessions` table on the SAME database handle. When no
+  // commissioning code is configured, registration reports `unavailable` and
+  // login simply has no officer to match (fail closed — never faked).
+  const officerService: OfficerService =
+    overrides.officerService ??
+    new OfficerService({
+      store: overrides.officerStore ?? new SqliteOfficerStore(db),
+      registrationCode:
+        overrides.officerRegistrationCode !== undefined
+          ? overrides.officerRegistrationCode
+          : config.officer?.registrationCode ?? '',
+      sessionSecure: config.account?.sessionSecure ?? true,
+      sessionSameSite: config.account?.sessionSameSite,
+      sessionTtlMs: config.account?.sessionTtlMs,
+      db,
     });
 
   // ── Real OAuth / delivery provider wiring (J.4) ─────────────────
@@ -273,14 +342,71 @@ export function createVerificationServer(
 
   const accountService = new AccountService({
     store: persistentAccountStore,
-    encryptionSecret: overrides.accountEncryptionSecret ?? config.account?.encryptionSecret ?? '',
-    biometricEncryptionSecret:
-      overrides.accountBiometricEncryptionSecret ?? config.account?.biometricEncryptionSecret ?? '',
-    otp: { hashSecret: config.otp.hashSecret || DEV_FALLBACK_OTP_SECRET },
+encryptionSecret: overrides.accountEncryptionSecret ?? config.account?.encryptionSecret ?? '',
+      biometricEncryptionSecret:
+        overrides.accountBiometricEncryptionSecret ?? config.account?.biometricEncryptionSecret ?? '',
+      otp: { hashSecret: otpHashSecret },
     smsProvider,
     whatsAppProvider,
     googleProvider,
   });
+
+  // ── Registration + forgot-password stacks (Part 1) ──────────────
+  // Real providers only: missing credentials ⇒ the affected step reports
+  // `unavailable` and FAILS CLOSED — nothing is ever faked.
+  const registrationStore: RegistrationSessionStore =
+    overrides.registrationStore ?? new SqliteRegistrationSessionStore(db);
+  const forgotPasswordStore: ForgotPasswordSessionStore =
+    overrides.forgotPasswordStore ?? new SqliteForgotPasswordSessionStore(db);
+
+  const registrationAadhaarOcr: AadhaarOcrProvider =
+    overrides.registrationAadhaarOcrProvider ??
+    new SurepassAadhaarOcrProvider(
+      config.registration?.aadhaarOcr ?? { providerName: '', apiToken: '', baseUrl: '', ocrPath: '', timeoutMs: 20000 },
+    );
+  const registrationPincode: PincodeProvider = createPincodeProviderFromConfig(
+    config.registration?.pincode ?? {},
+  );
+  const registrationGeocoding: GeocodingProvider = new NominatimReverseGeocoder(
+    config.registration?.geocoding ?? {},
+  );
+  const registrationDisposableEmail: DisposableEmailChecker =
+    overrides.registrationDisposableEmailChecker ??
+    createDisposableEmailChecker(config.registration?.disposableEmailExtraDomains ?? '');
+  const registrationLiveness: LivenessService =
+    overrides.registrationLiveness ??
+    new InMemoryLivenessService({ now: () => Date.now() });
+
+  const registrationService: RegistrationService =
+    overrides.registrationService ??
+    new RegistrationService({
+      store: registrationStore,
+      accounts: accountService,
+      mailer,
+      otp: { hashSecret: otpHashSecret },
+      smsProvider,
+      whatsAppProvider,
+      aadhaarProvider,
+      aadhaarOcr: registrationAadhaarOcr,
+      pincodeProvider: registrationPincode,
+      geocodingProvider: registrationGeocoding,
+      disposableEmail: registrationDisposableEmail,
+      liveness: registrationLiveness,
+      photoConfig: { maxBytes: config.registration?.photoMaxBytes },
+      sessionTtlMs: config.registration?.sessionTtlMs,
+    });
+
+  const forgotPasswordService: ForgotPasswordService =
+    overrides.forgotPasswordService ??
+    new ForgotPasswordService({
+      store: forgotPasswordStore,
+      accounts: accountService,
+      mailer,
+      otp: { hashSecret: otpHashSecret },
+      liveness: registrationLiveness,
+      disposableEmail: registrationDisposableEmail,
+      sessionTtlMs: config.registration?.sessionTtlMs,
+    });
 
   const emailSendIpLimiter = new RateLimiter({
     maxEvents: config.otp.maxSendsPerIpPerHour,
@@ -291,6 +417,47 @@ export function createVerificationServer(
   const accountRegisterLimiter = new RateLimiter({ maxEvents: 3, windowMs: 60 * 60 * 1000 });
   const accountLoginLimiter = new RateLimiter({ maxEvents: 5, windowMs: 60 * 60 * 1000 });
   const accountOtpSendLimiter = new RateLimiter({ maxEvents: 10, windowMs: 60 * 60 * 1000 });
+  const officerAuthLimiter = new RateLimiter({ maxEvents: 5, windowMs: 60 * 60 * 1000 });
+  const registrationBeginLimiter = new RateLimiter({ maxEvents: 5, windowMs: 60 * 60 * 1000 });
+  const forgotPasswordBeginLimiter = new RateLimiter({ maxEvents: 5, windowMs: 60 * 60 * 1000 });
+
+  // ── Registration cookie (HttpOnly, SameSite) ────────────────────
+  const REGISTRATION_COOKIE = 'priestate_reg_sid';
+  const registrationSessionMaxAgeSec = Math.floor((config.registration?.sessionTtlMs ?? 2 * 60 * 60 * 1000) / 1000);
+  const registrationSecure = config.account?.sessionSecure ?? true;
+  const registrationSameSite = config.account?.sessionSameSite ?? 'Lax';
+
+  function parseRegistrationCookie(req: http.IncomingMessage): string | null {
+    const cookieHeader = req.headers.cookie ?? '';
+    const match = new RegExp(`(?:^|;\\s*)${REGISTRATION_COOKIE}=([^;]+)`).exec(cookieHeader);
+    return match ? match[1] : null;
+  }
+
+  function setRegistrationCookie(token: string): string {
+    return `${REGISTRATION_COOKIE}=${token}; Path=/; HttpOnly; Max-Age=${registrationSessionMaxAgeSec}${registrationSecure ? '; Secure' : ''}; SameSite=${registrationSameSite}`;
+  }
+
+  function clearRegistrationCookie(): string {
+    return `${REGISTRATION_COOKIE}=; Path=/; Max-Age=0; HttpOnly`;
+  }
+
+  /**
+   * Read a fixed-size raw body (for multipart uploads) into a single Buffer.
+   * Returns null when the body exceeds `maxBytes` or is empty.
+   */
+  function readRawBody(req: http.IncomingMessage, maxBytes: number): Promise<Buffer | null> {
+    return new Promise((resolve) => {
+      let size = 0;
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > maxBytes) { resolve(null); req.destroy(); return; }
+        chunks.push(chunk);
+      });
+      req.on('end', () => resolve(chunks.length === 0 ? null : Buffer.concat(chunks)));
+      req.on('error', () => resolve(null));
+    });
+  }
 
   // ── HTTP plumbing ──────────────────────────────────────────────────
 
@@ -304,13 +471,13 @@ export function createVerificationServer(
     [key: string]: unknown;
   }
 
-  function readJson(req: http.IncomingMessage): Promise<JsonBody | null> {
+  function readJson(req: http.IncomingMessage, maxBytes: number = MAX_BODY_BYTES): Promise<JsonBody | null> {
     return new Promise((resolve) => {
       let size = 0;
       const chunks: Buffer[] = [];
       req.on('data', (chunk: Buffer) => {
         size += chunk.length;
-        if (size > MAX_BODY_BYTES) {
+        if (size > maxBytes) {
           resolve(null);
           req.destroy();
           return;
@@ -398,6 +565,13 @@ export function createVerificationServer(
     return match ? match[1] : null;
   }
 
+  /** Parse the SEPARATE officer session cookie (`priestate_officer_sid`). */
+  function parseOfficerCookie(req: http.IncomingMessage): string | null {
+    const cookieHeader = req.headers.cookie ?? '';
+    const match = new RegExp(`(?:^|;\\s*)${OFFICER_SESSION_COOKIE_NAME}=([^;]+)`).exec(cookieHeader);
+    return match ? match[1] : null;
+  }
+
   /**
    * Validate the session cookie. Returns `{ accountId, walletAddress }` if
    * valid, otherwise sends a 401 response and returns null.
@@ -405,7 +579,7 @@ export function createVerificationServer(
   function requireAuth(
     req: http.IncomingMessage,
     res: http.ServerResponse,
-  ): { accountId: string; walletAddress: string } | null {
+  ): { accountId: string; walletAddress: string | null } | null {
     const token = parseSessionCookie(req);
     if (!token) {
       sendJson(res, 401, { ok: false, reason: 'unauthorized', message: 'Login required.' });
@@ -424,6 +598,48 @@ export function createVerificationServer(
       return null;
     }
     return { accountId: session.accountId, walletAddress: session.walletAddress };
+  }
+
+  /**
+   * Some authenticated routes are ONLY meaningful once the account has a real
+   * Midnight wallet. Accounts created wallet-free keep a null-wallet session
+   * until the wallet-association step, so this guard rejects them cleanly.
+   */
+  function requireWallet(
+    auth: { accountId: string; walletAddress: string | null },
+    res: http.ServerResponse,
+  ): string | null {
+    if (!auth.walletAddress) {
+      sendJson(res, 403, {
+        ok: false,
+        reason: 'bad-state',
+        message: 'Associate a Midnight wallet with your account first.',
+      });
+      return null;
+    }
+    return auth.walletAddress;
+  }
+
+  /**
+   * Validate the OFFICER session cookie. Returns the public officer view if
+   * valid, otherwise sends a 401 response and returns null.
+   */
+  function requireOfficerAuth(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): PublicOfficerView | null {
+    const token = parseOfficerCookie(req);
+    if (!token) {
+      sendJson(res, 401, { ok: false, reason: 'unauthorized', message: 'Officer login required.' });
+      return null;
+    }
+    const officer = officerService.getBySessionToken(token);
+    if (!officer) {
+      res.setHeader('Set-Cookie', officerService.clearCookieHeader());
+      sendJson(res, 401, { ok: false, reason: 'session-expired', message: 'Officer session expired. Please log in again.' });
+      return null;
+    }
+    return officer;
   }
 
   function unavailableResponse(feature: 'email' | 'aadhaar'): { error: 'unavailable'; message: string } {
@@ -452,10 +668,18 @@ export function createVerificationServer(
           emailOtp: emailProvider.configured,
           aadhaarMobile: aadhaarProvider?.available === true,
           registry: registryService.available,
+          registration: {
+            ...registrationService.capabilities,
+            passwordRecoveryConfigured: forgotPasswordService.emailConfigured,
+          },
           account: {
             smsOtp: accountService.smsConfigured,
             whatsappOtp: accountService.whatsappConfigured,
             google: accountService.googleConfigured,
+          },
+          officer: {
+            registration: officerService.capabilities().registrationAvailable,
+            login: officerService.capabilities().loginAvailable,
           },
         },
         aadhaarProvider: aadhaarProvider?.available === true ? aadhaarProvider.name : null,
@@ -468,6 +692,33 @@ export function createVerificationServer(
       return;
     }
 
+    // ── Registration (Part 1) — capabilities + resume ─────────────
+    if (req.method === 'GET' && url === '/api/v1/registration/capabilities') {
+      sendJson(res, 200, {
+        ok: true,
+        capabilities: {
+          ...registrationService.capabilities,
+          passwordRecoveryConfigured: forgotPasswordService.emailConfigured,
+        },
+      });
+      return;
+    }
+    if (req.method === 'GET' && url === '/api/v1/registration/status') {
+      const token = parseRegistrationCookie(req);
+      if (!token) {
+        sendJson(res, 200, { ok: true, session: null });
+        return;
+      }
+      const status = registrationService.status(token);
+      if (!status) {
+        res.setHeader('Set-Cookie', clearRegistrationCookie());
+        sendJson(res, 200, { ok: true, session: null });
+        return;
+      }
+      sendJson(res, 200, { ok: true, session: status });
+      return;
+    }
+
     if (req.method === 'GET' && url === '/api/v1/account/me') {
       routeAccountMe(req, res);
       return;
@@ -476,6 +727,20 @@ export function createVerificationServer(
     // Logout works for both GET and POST for easy client integration.
     if (url === '/api/v1/account/logout' && (req.method === 'GET' || req.method === 'POST')) {
       routeAccountLogout(req, res);
+      return;
+    }
+
+    // ── Server-backed officer credential routes (single commissioned officer) ──
+    if (req.method === 'GET' && url === '/api/v1/officer/auth/capabilities') {
+      sendJson(res, 200, { ok: true, capabilities: officerService.capabilities() });
+      return;
+    }
+    if (req.method === 'GET' && url === '/api/v1/officer/auth/me') {
+      routeOfficerMe(req, res);
+      return;
+    }
+    if (url === '/api/v1/officer/auth/logout' && (req.method === 'GET' || req.method === 'POST')) {
+      routeOfficerLogout(req, res);
       return;
     }
 
@@ -530,6 +795,14 @@ export function createVerificationServer(
       return;
     }
 
+    // Multipart uploads (registration) are handled BEFORE the JSON body read.
+    if (url === '/api/v1/registration/aadhaar-document') {
+      return void (await routeRegistrationAadhaarDocument(req, res));
+    }
+    if (url === '/api/v1/registration/photo') {
+      return void (await routeRegistrationPhoto(req, res));
+    }
+
     const body = await readJson(req);
     if (body === null) {
       sendJson(res, 400, { error: 'invalid-body' });
@@ -579,6 +852,58 @@ export function createVerificationServer(
         return void (await routeBiometricVerificationComplete(req, res, body));
       case '/api/v1/account/login':
         return void (await routeAccountLogin(req, res, body));
+      case '/api/v1/account/wallet/associate':
+        return void (await routeAccountAssociateWallet(req, res, body));
+      case '/api/v1/officer/auth/register':
+        return void (await routeOfficerRegister(req, res, body));
+      case '/api/v1/officer/auth/login':
+        return void (await routeOfficerLogin(req, res, body));
+      // ── Registration stepper (Part 1) ─────────────────────────────
+      case '/api/v1/registration/begin':
+        return void (await routeRegistrationBegin(req, res));
+      case '/api/v1/registration/personal':
+        return void (await routeRegistrationPersonal(req, res, body));
+      case '/api/v1/registration/email':
+        return void (await routeRegistrationEmail(req, res, body));
+      case '/api/v1/registration/email/verify':
+        return void (await routeRegistrationEmailVerify(req, res, body));
+      case '/api/v1/registration/sms/issue':
+        return void (await routeRegistrationSmsIssue(req, res));
+      case '/api/v1/registration/sms/verify':
+        return void (await routeRegistrationSmsVerify(req, res, body));
+      case '/api/v1/registration/whatsapp/issue':
+        return void (await routeRegistrationWhatsappIssue(req, res));
+      case '/api/v1/registration/whatsapp/verify':
+        return void (await routeRegistrationWhatsappVerify(req, res, body));
+      case '/api/v1/registration/aadhaar-mobile/start':
+        return void (await routeRegistrationAadhaarMobileStart(req, res));
+      case '/api/v1/registration/aadhaar-mobile/complete':
+        return void (await routeRegistrationAadhaarMobileComplete(req, res, body));
+      case '/api/v1/registration/password':
+        return void routeRegistrationPassword(req, res, body);
+      case '/api/v1/registration/liveness/start':
+        return void routeRegistrationLivenessStart(req, res);
+      case '/api/v1/registration/liveness/evidence':
+        return void routeRegistrationLivenessEvidence(req, res, body);
+      case '/api/v1/registration/location':
+        return void (await routeRegistrationLocation(req, res, body));
+      case '/api/v1/registration/finalize':
+        return void routeRegistrationFinalize(req, res);
+      // ── Forgot-password (Part 1) ──────────────────────────────────
+      case '/api/v1/account/forgot-password/begin':
+        return void (await routeForgotPasswordBegin(req, res, body));
+      case '/api/v1/account/forgot-password/email/verify':
+        return void routeForgotPasswordEmailVerify(res, body);
+      case '/api/v1/account/forgot-password/liveness/start':
+        return void routeForgotPasswordLivenessStart(res, body);
+      case '/api/v1/account/forgot-password/liveness/evidence':
+        return void routeForgotPasswordLivenessEvidence(res, body);
+      case '/api/v1/account/forgot-password/biometric/start':
+        return void routeForgotPasswordBiometricStart(res, body);
+      case '/api/v1/account/forgot-password/biometric/verify':
+        return void routeForgotPasswordBiometricVerify(res, body);
+      case '/api/v1/account/forgot-password/reset':
+        return void routeForgotPasswordReset(res, body);
       default:
         sendJson(res, 404, { error: 'not-found' });
     }
@@ -706,7 +1031,9 @@ export function createVerificationServer(
       });
       return;
     }
-    const result = await accountService.issueSmsOtp(auth.walletAddress);
+    const wallet = requireWallet(auth, res);
+    if (!wallet) return;
+    const result = await accountService.issueSmsOtp(wallet);
     if (result.ok === true) {
       sendJson(res, 200, { ok: true, channel: 'sms', expiresAt: result.expiresAt });
       return;
@@ -734,7 +1061,9 @@ export function createVerificationServer(
       sendJson(res, 400, { ok: false, reason: 'invalid', message: 'Enter the 6-digit code.' });
       return;
     }
-    const result = accountService.verifySmsOtp(auth.walletAddress, code);
+    const wallet = requireWallet(auth, res);
+    if (!wallet) return;
+    const result = accountService.verifySmsOtp(wallet, code);
     if (result.ok === true) {
       sendJson(res, 200, { ok: true, channel: 'sms' });
       return;
@@ -762,7 +1091,9 @@ export function createVerificationServer(
       });
       return;
     }
-    const result = await accountService.issueWhatsappOtp(auth.walletAddress);
+    const wallet = requireWallet(auth, res);
+    if (!wallet) return;
+    const result = await accountService.issueWhatsappOtp(wallet);
     if (result.ok === true) {
       sendJson(res, 200, { ok: true, channel: 'whatsapp', expiresAt: result.expiresAt });
       return;
@@ -790,7 +1121,9 @@ export function createVerificationServer(
       sendJson(res, 400, { ok: false, reason: 'invalid', message: 'Enter the 6-digit code.' });
       return;
     }
-    const result = accountService.verifyWhatsappOtp(auth.walletAddress, code);
+    const wallet = requireWallet(auth, res);
+    if (!wallet) return;
+    const result = accountService.verifyWhatsappOtp(wallet, code);
     if (result.ok === true) {
       sendJson(res, 200, { ok: true, channel: 'whatsapp' });
       return;
@@ -815,7 +1148,9 @@ export function createVerificationServer(
       sendJson(res, 400, { ok: false, reason: 'bad-state', message: 'Google sign-in state + nonce are required.' });
       return;
     }
-    const result = accountService.googleComplete(auth.walletAddress, { state, nonce });
+    const wallet = requireWallet(auth, res);
+    if (!wallet) return;
+    const result = accountService.googleComplete(wallet, { state, nonce });
     if (result.ok && 'view' in result) {
       sendJson(res, 200, { ok: true, account: result.view });
       return;
@@ -869,7 +1204,9 @@ export function createVerificationServer(
   ): Promise<void> {
     const auth = requireAuth(req, res);
     if (!auth) return;
-    const result = accountService.googleBegin(auth.walletAddress);
+    const wallet = requireWallet(auth, res);
+    if (!wallet) return;
+    const result = accountService.googleBegin(wallet);
     if (!result.ok) {
       sendAccountError(res, result.reason);
       return;
@@ -959,7 +1296,9 @@ export function createVerificationServer(
   ): void {
     const auth = requireAuth(req, res);
     if (!auth) return;
-    const result = accountService.beginBiometricEnrollment(auth.walletAddress);
+    const wallet = requireWallet(auth, res);
+    if (!wallet) return;
+    const result = accountService.beginBiometricEnrollment(wallet);
     if (!result.ok) return sendAccountError(res, result.reason);
     sendJson(res, 200, result);
   }
@@ -978,13 +1317,15 @@ export function createVerificationServer(
   ): void {
     const auth = requireAuth(req, res);
     if (!auth) return;
+    const wallet = requireWallet(auth, res);
+    if (!wallet) return;
     const token = str(body, 'token');
     const consent = body?.consent === true;
     const embeddings = body?.embeddings;
     if (!Array.isArray(embeddings)) return sendAccountError(res, 'invalid-input');
     let result: ReturnType<AccountService['enrollBiometricReference']>;
     try {
-      result = accountService.enrollBiometricReference(auth.walletAddress, {
+      result = accountService.enrollBiometricReference(wallet, {
         token,
         embeddings: embeddings as readonly FaceEmbedding[],
         consent,
@@ -1008,7 +1349,9 @@ export function createVerificationServer(
   ): void {
     const auth = requireAuth(req, res);
     if (!auth) return;
-    const result = accountService.revokeBiometricReference(auth.walletAddress);
+    const wallet = requireWallet(auth, res);
+    if (!wallet) return;
+    const result = accountService.revokeBiometricReference(wallet);
     if (!result.ok) return sendAccountError(res, result.reason);
     sendJson(res, 200, result);
   }
@@ -1050,13 +1393,15 @@ export function createVerificationServer(
   ): void {
     const auth = requireAuth(req, res);
     if (!auth) return;
+    const wallet = requireWallet(auth, res);
+    if (!wallet) return;
     const token = str(body, 'verificationToken');
     const welcomeEmbedding = body?.liveEmbedding;
     if (!Array.isArray(welcomeEmbedding) || welcomeEmbedding.length === 0) {
       sendJson(res, 400, { ok: false, verdict: 'invalid_input' });
       return;
     }
-    const result = accountService.verifyBiometricMatch(auth.walletAddress, {
+    const result = accountService.verifyBiometricMatch(wallet, {
       verificationToken: token,
       liveEmbedding: welcomeEmbedding as readonly number[],
     });
@@ -1080,8 +1425,10 @@ export function createVerificationServer(
   ): Promise<void> {
     const auth = requireAuth(req, res);
     if (!auth) return;
+    const wallet = requireWallet(auth, res);
+    if (!wallet) return;
     const result = accountService.recordIdentityEvidence(
-      auth.walletAddress,
+      wallet,
       body?.identityEvidence as IdentityEvidence | null | undefined,
     );
     if (!result.ok) {
@@ -1135,12 +1482,46 @@ export function createVerificationServer(
   ): void {
     const auth = requireAuth(req, res);
     if (!auth) return;
-    const record = persistentAccountStore.getByWallet(auth.walletAddress);
+    const record = persistentAccountStore.getById(auth.accountId);
     if (!record) {
       sendJson(res, 404, { ok: false, reason: 'not-found' });
       return;
     }
     sendJson(res, 200, { ok: true, account: { accountId: record.accountId, walletAddress: record.walletAddress } });
+  }
+
+  /**
+   * Bind the real Midnight wallet to the session's account. Used after a
+   * wallet-free registration so the citizen's wallet gates property flows.
+   * On success the session cookie is re-minted to carry the wallet.
+   */
+  async function routeAccountAssociateWallet(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): Promise<void> {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const walletAddress = str(body, 'walletAddress');
+    if (!/^0x[a-fA-F0-9]{64}$/.test(walletAddress)) {
+      sendJson(res, 400, { ok: false, reason: 'invalid-input', issues: ['A valid wallet address is required.'] });
+      return;
+    }
+    const result = accountService.associateWallet(auth.accountId, walletAddress);
+    if (!result.ok) {
+      const status =
+        result.reason === 'not-found' ? 404
+        : result.reason === 'invalid-input' ? 400
+        : 409;
+      sendJson(res, status, { ok: false, reason: result.reason });
+      return;
+    }
+    const current = parseSessionCookie(req);
+    if (current) sessionService.destroy(current);
+    const { cookieHeader } = sessionService.create(auth.accountId, walletAddress);
+    res.setHeader('Set-Cookie', cookieHeader);
+    const account = 'view' in result ? result.view : null;
+    sendJson(res, 200, { ok: true, account });
   }
 
   /** End the current session (logout). */
@@ -1158,6 +1539,625 @@ export function createVerificationServer(
       ),
     );
     sendJson(res, 200, { ok: true });
+  }
+
+  // ── Server-backed officer credential routes ─────────────────────────
+
+  /**
+   * POST /api/v1/officer/auth/register
+   *
+   * Mint the SINGLE commissioned officer account. Requires the one-time
+   * commissioning code (OFFICER_REGISTRATION_CODE) and refuses any further
+   * registration once an officer exists. On success it sets the SEPARATE
+   * `priestate_officer_sid` HttpOnly cookie. The raw code/password are never
+   * echoed back or logged.
+   */
+  function routeOfficerRegister(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): void {
+    const limit = officerAuthLimiter.take(`ip:${clientIp(req)}`);
+    if (!limit.allowed) {
+      sendJson(res, 429, {
+        ok: false,
+        reason: 'rate-limited',
+        retryAfterMs: limit.retryAfterMs,
+        message: 'Too many attempts. Try again later.',
+      });
+      return;
+    }
+    const result = officerService.register({
+      displayName: str(body, 'displayName'),
+      password: str(body, 'password'),
+      passwordConfirm: str(body, 'passwordConfirm'),
+      registrationCode: str(body, 'registrationCode'),
+    });
+    if (!result.ok) {
+      switch (result.reason) {
+        case 'registration-disabled':
+          sendJson(res, 503, {
+            ok: false,
+            reason: 'registration-disabled',
+            message: 'Officer registration is not enabled on this deployment (no commissioning code is configured). It was NOT simulated.',
+          });
+          return;
+        case 'code-invalid':
+          sendJson(res, 403, { ok: false, reason: 'code-invalid', message: 'The commissioning code is incorrect.' });
+          return;
+        case 'officer-exists':
+          sendJson(res, 409, {
+            ok: false,
+            reason: 'officer-exists',
+            message: 'An officer account already exists. Officer registration is a single, one-time commissioning step.',
+          });
+          return;
+        case 'unavailable':
+          sendJson(res, 503, { ok: false, reason: 'unavailable' });
+          return;
+        default:
+          sendJson(res, 400, {
+            ok: false,
+            reason: 'invalid-input',
+            message: 'Invalid officer details: display name 2–80 characters, password at least 10 characters with upper/lowercase, a number and a symbol.',
+          });
+      }
+      return;
+    }
+    res.setHeader('Set-Cookie', result.cookieHeader);
+    sendJson(res, 201, { ok: true, officer: result.view, capabilities: officerService.capabilities() });
+  }
+
+  /**
+   * POST /api/v1/officer/auth/login
+   *
+   * Exchange display name + password for the officer session cookie. Fails
+   * closed with a uniform 401 (no username oracle). The password is compared
+   * against the stored scrypt hash server-side and never returned.
+   */
+  function routeOfficerLogin(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): void {
+    const limit = officerAuthLimiter.take(`ip:${clientIp(req)}`);
+    if (!limit.allowed) {
+      sendJson(res, 429, {
+        ok: false,
+        reason: 'rate-limited',
+        retryAfterMs: limit.retryAfterMs,
+        message: 'Too many attempts. Try again later.',
+      });
+      return;
+    }
+    const result = officerService.login({
+      displayName: str(body, 'displayName'),
+      password: str(body, 'password'),
+    });
+    if (!result.ok) {
+      sendJson(res, 401, { ok: false, reason: 'unauthorized', message: 'Invalid officer credentials.' });
+      return;
+    }
+    res.setHeader('Set-Cookie', result.cookieHeader);
+    sendJson(res, 200, { ok: true, officer: result.view, capabilities: officerService.capabilities() });
+  }
+
+  /** GET /api/v1/officer/auth/me — current server-backed officer (or 401). */
+  function routeOfficerMe(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): void {
+    const officer = requireOfficerAuth(req, res);
+    if (!officer) return;
+    sendJson(res, 200, { ok: true, officer, capabilities: officerService.capabilities() });
+  }
+
+  /** POST/GET /api/v1/officer/auth/logout — destroy the officer session. */
+  function routeOfficerLogout(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): void {
+    const token = parseOfficerCookie(req);
+    if (token) officerService.logout(token);
+    res.setHeader('Set-Cookie', officerService.clearCookieHeader());
+    sendJson(res, 200, { ok: true });
+  }
+
+  // ── Registration stepper (Part 1) ───────────────────────────────
+  /** Map a RegistrationResult to the HTTP response. */
+  function sendRegistrationResult(
+    res: http.ServerResponse,
+    result: RegistrationResult<unknown>,
+  ): void {
+    if (result.ok) {
+      sendJson(res, 200, { ok: true, ...(result.value as Record<string, unknown>) });
+      return;
+    }
+    const message = 'message' in result ? result.message : undefined;
+    const issues = 'issues' in result ? result.issues : undefined;
+    const withMessage = message === undefined ? {} : { message };
+    switch (result.reason) {
+      case 'unavailable':
+        sendJson(res, 503, { ok: false, reason: 'unavailable', ...withMessage });
+        break;
+      case 'bad-state':
+        sendJson(res, 409, { ok: false, reason: 'bad-state', ...withMessage });
+        break;
+      case 'invalid-input':
+        sendJson(res, 400, { ok: false, reason: 'invalid-input', issues: issues ?? [] });
+        break;
+      case 'not-found':
+        sendJson(res, 404, { ok: false, reason: 'not-found', ...withMessage });
+        break;
+      case 'already-registered':
+        sendJson(res, 409, { ok: false, reason: 'already-registered', ...withMessage });
+        break;
+      case 'provider-error':
+        sendJson(res, 502, { ok: false, reason: 'provider-error', ...withMessage });
+        break;
+      case 'mismatch':
+        sendJson(res, 422, { ok: false, reason: 'mismatch', ...withMessage });
+        break;
+    }
+  }
+
+  /** Map a ForgotPasswordResult to the HTTP response. */
+  function sendForgotResult(
+    res: http.ServerResponse,
+    result: ForgotPasswordResult<unknown>,
+  ): void {
+    if (result.ok) {
+      sendJson(res, 200, { ok: true, ...(result.value as Record<string, unknown>) });
+      return;
+    }
+    const message = 'message' in result ? result.message : undefined;
+    const issues = 'issues' in result ? result.issues : undefined;
+    const withMessage = message === undefined ? {} : { message };
+    switch (result.reason) {
+      case 'unavailable':
+        sendJson(res, 503, { ok: false, reason: 'unavailable', ...withMessage });
+        break;
+      case 'not-found':
+        sendJson(res, 404, { ok: false, reason: 'not-found', ...withMessage });
+        break;
+      case 'bad-state':
+        sendJson(res, 409, { ok: false, reason: 'bad-state', ...withMessage });
+        break;
+      case 'invalid-input':
+        sendJson(res, 400, { ok: false, reason: 'invalid-input', issues: issues ?? [] });
+        break;
+      case 'provider-error':
+        sendJson(res, 502, { ok: false, reason: 'provider-error', ...withMessage });
+        break;
+      case 'mismatch':
+        sendJson(res, 422, { ok: false, reason: 'mismatch', ...withMessage });
+        break;
+      case 'no-reference':
+        sendJson(res, 409, { ok: false, reason: 'no-reference', message: 'No enrolled biometric reference exists.' });
+        break;
+      case 'revoked':
+        sendJson(res, 409, { ok: false, reason: 'revoked', message: 'The biometric reference has been revoked.' });
+        break;
+    }
+  }
+
+  function sendMissingRegistration(res: http.ServerResponse): void {
+    sendJson(res, 401, { ok: false, reason: 'no-session', message: 'Start or resume a registration first.' });
+  }
+
+  async function routeRegistrationBegin(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const limit = registrationBeginLimiter.take(`ip:${clientIp(req)}`);
+    if (!limit.allowed) {
+      sendJson(res, 429, {
+        ok: false,
+        reason: 'rate-limited',
+        retryAfterMs: limit.retryAfterMs,
+        message: 'Too many attempts. Try again later.',
+      });
+      return;
+    }
+    const result = registrationService.begin();
+    if (!result.ok) {
+      sendRegistrationResult(res, result);
+      return;
+    }
+    const sessionId = result.value.token;
+    res.setHeader('Set-Cookie', setRegistrationCookie(sessionId));
+    sendJson(res, 200, {
+      ok: true,
+      session: sessionId,
+      expiresAt: result.value.expiresAt,
+    });
+  }
+
+  async function routeRegistrationPersonal(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): Promise<void> {
+    const token = parseRegistrationCookie(req);
+    if (!token) {
+      sendMissingRegistration(res);
+      return;
+    }
+    const result = await registrationService.personal(token, {
+      fullName: str(body, 'fullName'),
+      aadhaarNumber: str(body, 'aadhaarNumber'),
+      addressOnAadhaar: str(body, 'addressOnAadhaar'),
+      pincode: str(body, 'pincode'),
+      dateOfBirth: str(body, 'dateOfBirth'),
+      mobile: str(body, 'mobile'),
+    });
+    sendRegistrationResult(res, result);
+  }
+
+  async function routeRegistrationAadhaarDocument(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const token = parseRegistrationCookie(req);
+    if (!token) {
+      sendMissingRegistration(res);
+      return;
+    }
+    const maxBytes = config.registration?.aadhaarDocumentMaxBytes ?? 10 * 1024 * 1024;
+    const raw = await readRawBody(req, maxBytes);
+    if (raw === null) {
+      sendJson(res, 400, { ok: false, reason: 'invalid-body' });
+      return;
+    }
+    const parsed = parseMultipart(req.headers['content-type'], raw, maxBytes);
+    if (!parsed.ok) {
+      sendJson(res, 400, { ok: false, reason: 'invalid-multipart' });
+      return;
+    }
+    const doc = parsed.body.files.find((f) => f.name === 'document') ?? parsed.body.files[0];
+    if (!doc) {
+      sendJson(res, 400, { ok: false, reason: 'missing-file' });
+      return;
+    }
+    const result = await registrationService.aadhaarDocument(token, {
+      fileName: doc.fileName,
+      mimeType: doc.mimeType,
+      data: doc.data,
+    });
+    sendRegistrationResult(res, result);
+  }
+
+  async function routeRegistrationEmail(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): Promise<void> {
+    const token = parseRegistrationCookie(req);
+    if (!token) {
+      sendMissingRegistration(res);
+      return;
+    }
+    const result = await registrationService.submitEmail(token, str(body, 'email'));
+    sendRegistrationResult(res, result);
+  }
+
+  async function routeRegistrationEmailVerify(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): Promise<void> {
+    const token = parseRegistrationCookie(req);
+    if (!token) {
+      sendMissingRegistration(res);
+      return;
+    }
+    const result = registrationService.verifyEmailOtp(token, str(body, 'code'));
+    sendRegistrationResult(res, result);
+  }
+
+  async function routeRegistrationSmsIssue(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const token = parseRegistrationCookie(req);
+    if (!token) {
+      sendMissingRegistration(res);
+      return;
+    }
+    const result = await registrationService.issueSmsOtp(token);
+    sendRegistrationResult(res, result);
+  }
+
+  async function routeRegistrationSmsVerify(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): Promise<void> {
+    const token = parseRegistrationCookie(req);
+    if (!token) {
+      sendMissingRegistration(res);
+      return;
+    }
+    const result = registrationService.verifySmsOtp(token, str(body, 'code'));
+    sendRegistrationResult(res, result);
+  }
+
+  async function routeRegistrationWhatsappIssue(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const token = parseRegistrationCookie(req);
+    if (!token) {
+      sendMissingRegistration(res);
+      return;
+    }
+    const result = await registrationService.issueWhatsappOtp(token);
+    sendRegistrationResult(res, result);
+  }
+
+  async function routeRegistrationWhatsappVerify(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): Promise<void> {
+    const token = parseRegistrationCookie(req);
+    if (!token) {
+      sendMissingRegistration(res);
+      return;
+    }
+    const result = registrationService.verifyWhatsappOtp(token, str(body, 'code'));
+    sendRegistrationResult(res, result);
+  }
+
+  async function routeRegistrationAadhaarMobileStart(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const token = parseRegistrationCookie(req);
+    if (!token) {
+      sendMissingRegistration(res);
+      return;
+    }
+    const result = await registrationService.aadhaarMobileStart(token);
+    sendRegistrationResult(res, result);
+  }
+
+  async function routeRegistrationAadhaarMobileComplete(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): Promise<void> {
+    const token = parseRegistrationCookie(req);
+    if (!token) {
+      sendMissingRegistration(res);
+      return;
+    }
+    const result = await registrationService.aadhaarMobileComplete(token, {
+      sessionId: str(body, 'sessionId'),
+      code: str(body, 'code'),
+    });
+    sendRegistrationResult(res, result);
+  }
+
+  function routeRegistrationPassword(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): void {
+    const token = parseRegistrationCookie(req);
+    if (!token) {
+      sendMissingRegistration(res);
+      return;
+    }
+    const result = registrationService.setPassword(token, {
+      password: str(body, 'password'),
+      confirm: str(body, 'confirm'),
+    });
+    sendRegistrationResult(res, result);
+  }
+
+  function routeRegistrationLivenessStart(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): void {
+    const token = parseRegistrationCookie(req);
+    if (!token) {
+      sendMissingRegistration(res);
+      return;
+    }
+    const result = registrationService.livenessStart(token);
+    sendRegistrationResult(res, result);
+  }
+
+  function routeRegistrationLivenessEvidence(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): void {
+    const token = parseRegistrationCookie(req);
+    if (!token) {
+      sendMissingRegistration(res);
+      return;
+    }
+    const result = registrationService.livenessEvidence(
+      token,
+      body as unknown as import('./registration/liveness').LivenessEvidenceInput,
+    );
+    sendRegistrationResult(res, result);
+  }
+
+  async function routeRegistrationLocation(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): Promise<void> {
+    const token = parseRegistrationCookie(req);
+    if (!token) {
+      sendMissingRegistration(res);
+      return;
+    }
+    const result = await registrationService.location(token, body);
+    sendRegistrationResult(res, result);
+  }
+
+  async function routeRegistrationPhoto(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const token = parseRegistrationCookie(req);
+    if (!token) {
+      sendMissingRegistration(res);
+      return;
+    }
+    const maxBytes = config.registration?.photoMaxBytes ?? 8 * 1024 * 1024;
+    const raw = await readRawBody(req, maxBytes);
+    if (raw === null) {
+      sendJson(res, 400, { ok: false, reason: 'invalid-body' });
+      return;
+    }
+    const parsed = parseMultipart(req.headers['content-type'], raw, maxBytes);
+    if (!parsed.ok) {
+      sendJson(res, 400, { ok: false, reason: 'invalid-multipart' });
+      return;
+    }
+    const file = parsed.body.files[0];
+    if (!file) {
+      sendJson(res, 400, { ok: false, reason: 'missing-file' });
+      return;
+    }
+    const result = registrationService.photo(token, file.data);
+    sendRegistrationResult(res, result);
+  }
+
+  function routeRegistrationFinalize(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): void {
+    const token = parseRegistrationCookie(req);
+    if (!token) {
+      sendMissingRegistration(res);
+      return;
+    }
+    const result = registrationService.finalize(token);
+    if (!result.ok) {
+      sendRegistrationResult(res, result);
+      return;
+    }
+    // The freshly-finalized account is immediately usable: mint an account
+    // session so the browser can start the real biometric ENROLLMENT step
+    // right after finalize (enrollment requires `requireAuth`). Also clear the
+    // one-time registration cookie.
+    const { cookieHeader } = sessionService.create(result.value.accountId, result.value.walletAddress);
+    res.setHeader('Set-Cookie', [clearRegistrationCookie(), cookieHeader]);
+    sendJson(res, 200, {
+      ok: true,
+      accountId: result.value.accountId,
+      walletAddress: result.value.walletAddress,
+    });
+  }
+
+  // ── Forgot-password (Part 1) ────────────────────────────────────
+  async function routeForgotPasswordBegin(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): Promise<void> {
+    const limit = forgotPasswordBeginLimiter.take(`ip:${clientIp(req)}`);
+    if (!limit.allowed) {
+      sendJson(res, 429, {
+        ok: false,
+        reason: 'rate-limited',
+        retryAfterMs: limit.retryAfterMs,
+        message: 'Too many attempts. Try again later.',
+      });
+      return;
+    }
+    const result = await forgotPasswordService.begin(
+      str(body, 'walletAddress'),
+      str(body, 'email'),
+    );
+    sendForgotResult(res, result);
+  }
+
+  function routeForgotPasswordEmailVerify(
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): void {
+    const result = forgotPasswordService.verifyEmailOtp(
+      str(body, 'walletAddress'),
+      str(body, 'code'),
+    );
+    sendForgotResult(res, result);
+  }
+
+  function routeForgotPasswordLivenessStart(
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): void {
+    const result = forgotPasswordService.livenessStart(str(body, 'walletAddress'));
+    sendForgotResult(res, result);
+  }
+
+  function routeForgotPasswordLivenessEvidence(
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): void {
+    const result = forgotPasswordService.livenessEvidence(
+      str(body, 'walletAddress'),
+      body as unknown as import('./registration/liveness').LivenessEvidenceInput,
+    );
+    sendForgotResult(res, result);
+  }
+
+  function routeForgotPasswordBiometricStart(
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): void {
+    const result = forgotPasswordService.biometricStart(str(body, 'walletAddress'));
+    sendForgotResult(res, result);
+  }
+
+  function routeForgotPasswordBiometricVerify(
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): void {
+    const raw = body['liveEmbedding'] as unknown;
+    const liveEmbedding = Array.isArray(raw) && raw.every((x) => typeof x === 'number')
+      ? raw
+      : undefined;
+    if (liveEmbedding === undefined) {
+      sendJson(res, 400, { ok: false, reason: 'invalid-input', issues: [{ field: 'liveEmbedding', code: 'invalid' }] });
+      return;
+    }
+    const result = forgotPasswordService.biometricVerify(
+      str(body, 'walletAddress'),
+      {
+        verificationToken: str(body, 'verificationToken'),
+        liveEmbedding,
+      },
+    );
+    sendForgotResult(res, result);
+  }
+
+  function routeForgotPasswordReset(
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): void {
+    const walletAddress = str(body, 'walletAddress');
+    const result = forgotPasswordService.reset(walletAddress, {
+      newPassword: str(body, 'newPassword'),
+      confirmPassword: str(body, 'confirmPassword'),
+    });
+    if (!result.ok) {
+      sendForgotResult(res, result);
+      return;
+    }
+    // Destroy every existing session so the password change really takes effect.
+    const rec = accountService.get(walletAddress);
+    if (rec.ok && 'view' in rec) {
+      sessionService.destroyByAccount(rec.view.accountId);
+    }
+    sendJson(res, 200, { ok: true, ...(result.value as Record<string, unknown>) });
   }
 
   async function routeEmailSend(
@@ -1446,11 +2446,6 @@ function isMainModule(): boolean {
 
 if (isMainModule()) {
   const config = loadConfig();
-  if (!config.otp.hashSecret) {
-    console.warn(
-      '[priestate-verify] WARNING: OTP_HASH_SECRET is not set — using an insecure development secret. Set it before any real deployment.',
-    );
-  }
   const { server, port } = createVerificationServer(config);
   server.listen(port, () => {
     console.log(`[priestate-verify] listening on :${port}`);

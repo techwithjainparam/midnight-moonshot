@@ -19,21 +19,33 @@ import ContactVerificationPage from './pages/ContactVerificationPage';
 import OfficerPage from './pages/OfficerPage';
 import UserRegistrationPage from './pages/UserRegistrationPage';
 import LoginPage from './pages/LoginPage';
+import UserLoginPage from './pages/UserLoginPage';
+import OfficerLoginPage from './pages/OfficerLoginPage';
+import OfficerRegistrationPage from './pages/OfficerRegistrationPage';
 import IdentityVerificationPage from './pages/IdentityVerificationPage';
 
 // Route visibility model:
 //
-// PUBLIC    /                      landing + product info + connect CTA
-// WALLET    /profile/verify        connected wallet → contact profile step
+// PUBLIC    /                      landing + product info
+//           /register-account      account registration — NO wallet required,
+//                                  NO wallet address is typed or validated.
+//                                  After finalize, the citizen CONNECTS their
+//                                  real Midnight wallet to bind it to the
+//                                  account (wallet association), then enrolls
+//                                  biometrics. (Flow: LANDING → REGISTRATION
+//                                  → FINALIZE → CONNECT WALLET (associate)
+//                                  → biometric enrollment → LOGIN → factors.)
+//           /login                 account-type chooser
+//           /officer/login,        officer flows — not wallet-gated
+//           /officer/register
+// WALLET    /login/user            citizen login DOES require a connected wallet
+//           /profile/verify        connected wallet → contact profile step
 // PROTECTED (wallet + verified     /register, /register/review, /registry,
 //           contact profile*)      /property/:id, /verify/:id,
 //                                  /verification/:id, /dashboard
-// OFFICER   (demo-authorized)      /officer — NOT gated by contact profile
-//
-// * RequireProfile layers the one-time first-time-user contact
-//   verification on top of the existing wallet guard. The wallet remains
-//   the authorization identity; officers bypass the contact gate so the
-//   Officer Portal flow is unchanged.
+// OFFICER   (server credential +         /officer, /officer/login,
+//            demo-authorized fallback)    /officer/register — NOT gated by
+//                                        wallet or contact profile.
 //
 // Guards render nothing while authorization state is loading, so no
 // protected content ever flashes before wallet state is known.
@@ -51,8 +63,11 @@ export default function App() {
         <main className="app-main">
           <Routes>
             <Route path="/" element={<LandingPage />} />
-            <Route path="/login" element={<RequireWallet><LoginPage /></RequireWallet>} />
-            <Route path="/register-account" element={<RequireWallet><UserRegistrationPage /></RequireWallet>} />
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/login/user" element={<RequireWallet><UserLoginPage /></RequireWallet>} />
+            <Route path="/officer/login" element={<OfficerLoginPage />} />
+            <Route path="/officer/register" element={<OfficerRegistrationPage />} />
+            <Route path="/register-account" element={<UserRegistrationPage />} />
             <Route path="/identity-verification" element={<RequireWallet><IdentityVerificationPage /></RequireWallet>} />
             <Route path="/profile/verify" element={
               <RequireWallet><ContactVerificationPage /></RequireWallet>

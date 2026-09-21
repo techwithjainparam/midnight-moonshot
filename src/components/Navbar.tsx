@@ -4,13 +4,17 @@ import WalletStatus from './WalletStatus';
 
 // Navigation visibility model:
 //
-// Disconnected/loading → brand + Connect Wallet only.
-// USER (connected)     → Register, Registry, My Dashboard, My Properties.
-// OFFICER (demo)       → Officer Portal only — officer navigation is
-//                        never shown to normal users, and user
-//                        navigation is not mixed into the officer role.
+// Disconnected (public) → brand + Register + Sign In. No wallet-connect
+// button anywhere — wallet connection happens ONLY on the Login page.
+// USER (connected)      → Register, Registry, My Dashboard, My Properties.
+// OFFICER (demo)        → Officer Portal only — officer navigation is
+//                         never shown to normal users, and user
+//                         navigation is not mixed into the officer role.
 export default function Navbar() {
-  const { status, isOfficer, wallet } = useAuth();
+  const { status, isOfficer, officerAuthorized, wallet } = useAuth();
+  const showOfficerNav = status === 'connected' && isOfficer;
+  const officerRoleLabel =
+    (officerAuthorized ? 'OFFICER' : 'OFFICER · DEMO');
 
   const linkClass = ({ isActive }: { isActive: boolean }) =>
     `navbar-link${isActive ? ' active' : ''}`;
@@ -37,7 +41,7 @@ export default function Navbar() {
               <Link to="/dashboard#my-properties" className="navbar-link">
                 My Properties
               </Link>
-              <NavLink to="/login" className={linkClass}>
+              <NavLink to="/login/user" className={linkClass}>
                 Account
               </NavLink>
               <NavLink to="/identity-verification" className={linkClass}>
@@ -45,18 +49,28 @@ export default function Navbar() {
               </NavLink>
             </>
           )}
-          {status === 'connected' && isOfficer && (
+          {showOfficerNav && (
             <NavLink to="/officer" className={linkClass}>
               Officer Portal
             </NavLink>
           )}
+          {status !== 'connected' && (
+            <>
+              <NavLink to="/register-account" className={linkClass}>
+                Create Account
+              </NavLink>
+              <NavLink to="/login" className={linkClass}>
+                Sign In
+              </NavLink>
+            </>
+          )}
         </div>
 
         <div className="navbar-wallet">
-          {status === 'connected' && isOfficer && (
-            <span className="role-badge role-badge-officer">OFFICER · DEMO</span>
+          {showOfficerNav && (
+            <span className={`role-badge role-badge-officer`}>{officerRoleLabel}</span>
           )}
-          <WalletStatus wallet={wallet} />
+          {status === 'connected' && <WalletStatus wallet={wallet} />}
         </div>
       </div>
     </nav>

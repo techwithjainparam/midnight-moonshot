@@ -94,12 +94,15 @@ function baseRecord(overrides: Partial<AccountRecord> = {}): AccountRecord {
     whatsappOtpVerified: true,
     googleLinked: true,
     identityVerified: true,
+    emailVerified: true,
+    emailVerifiedAt: 1_700_000_000_000,
     createdAt: 1_700_000_000_000,
     biometricReferenceCipherText: null,
     biometricReferenceVersion: null,
     biometricEnrolledAt: null,
     biometricConsentAt: null,
     biometricRevokedAt: null,
+    identityEvidenceAcceptedAt: null,
     ...overrides,
   };
 }
@@ -286,9 +289,11 @@ test('C2: AccountRecord stores only an ENCRYPTED reference + metadata — never 
   const allowed = new Set([
     'accountId', 'walletAddress', 'passwordHash', 'passwordSalt',
     'piiCipherText', 'maskedMobile', 'maskedAadhaar', 'smsOtpVerified',
-    'whatsappOtpVerified', 'googleLinked', 'identityVerified', 'createdAt',
+    'whatsappOtpVerified', 'googleLinked', 'identityVerified', 'emailVerified',
+    'emailVerifiedAt', 'createdAt',
     'biometricReferenceCipherText', 'biometricReferenceVersion',
     'biometricEnrolledAt', 'biometricConsentAt', 'biometricRevokedAt',
+    'identityEvidenceAcceptedAt',
   ]);
   const rec = baseRecord();
   for (const key of Object.keys(rec)) {

@@ -36,12 +36,15 @@ function makeRecord(over: Partial<AccountRecord> = {}): AccountRecord {
     whatsappOtpVerified: false,
     googleLinked: false,
     identityVerified: false,
+    emailVerified: false,
+    emailVerifiedAt: null,
     createdAt: 1000,
     biometricReferenceCipherText: null,
     biometricReferenceVersion: null,
     biometricEnrolledAt: null,
     biometricConsentAt: null,
     biometricRevokedAt: null,
+    identityEvidenceAcceptedAt: null,
     ...over,
   };
 }
@@ -59,7 +62,7 @@ test('SqliteAccountStore round-trips a record exactly', () => {
   const rec = makeRecord();
   store.create(rec);
 
-  const got = store.getByWallet(rec.walletAddress);
+  const got = store.getByWallet('0x' + 'a'.repeat(64));
   assert.deepEqual(got, rec);
   assert.deepEqual(store.getById(rec.accountId), rec);
   assert.equal(store.list().length, 1);

@@ -11,6 +11,9 @@ contracts/managed/
 # Generated face-model weights (regenerated with `npm run copy-face-models`)
 public/models/
 
+# Generated MediaPipe vision wasm (regenerated with `npm run copy-hand-models`)
+public/mediapipe/
+
 # Local runtime state and secrets
 .midnight-state.json
 .midnight-state.json.backup

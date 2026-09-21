@@ -55,6 +55,16 @@ export interface ServerConfig {
      */
     readonly officerToken: string;
   };
+  /**
+   * One-time officer commissioning code for the server-backed officer
+   * credential (see server/account/officer.ts). It mints the SINGLE officer
+   * account for a deployment. Empty ⇒ officer registration is `unavailable`
+   * (fail closed). Never placed in a VITE_* variable or logged. Optional so
+   * test fixtures can omit it (loadConfig always populates it).
+   */
+  readonly officer?: {
+    readonly registrationCode: string;
+  };
   readonly account?: {
     /**
      * Server-only secret used to derive the AES key that encrypts account PII
@@ -107,10 +117,43 @@ export interface ServerConfig {
      */
     readonly sessionSameSite?: 'Lax' | 'Strict' | 'None';
   };
+  /**
+   * Registration-service configuration (Part 1 new stepper). Empty credential
+   * values make the corresponding provider `unavailable` (fail closed) — the
+   * stepper reports honestly and never fabricates a pass.
+   */
+  readonly registration?: {
+    /** Aadhaar document OCR (Surepass-style). Empty ⇒ OCR step unavailable. */
+    readonly aadhaarOcr: {
+      readonly providerName: string;
+      readonly apiToken: string;
+      readonly baseUrl: string;
+      readonly ocrPath: string;
+      readonly timeoutMs: number;
+    };
+    /** India Post pincode resolution (defaults to api.postalpincode.in). */
+    readonly pincode: {
+      readonly baseUrl?: string;
+      readonly timeoutMs?: number;
+    };
+    /** Reverse geocoding (defaults to nominatim.openstreetmap.org). */
+    readonly geocoding: {
+      readonly baseUrl?: string;
+      readonly timeoutMs?: number;
+    };
+    /** Extra disposable-email domains (comma-separated env). */
+    readonly disposableEmailExtraDomains: string;
+    /** Max raw bytes accepted for an uploaded Aadhaar document. */
+    readonly aadhaarDocumentMaxBytes: number;
+    /** Max raw bytes accepted for the passport photo. */
+    readonly photoMaxBytes: number;
+    /** Registration session lifetime. */
+    readonly sessionTtlMs: number;
+  };
 }
 
-function intEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
+function intEnv(name: string, fallback: number, env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[name];
   if (!raw || !raw.trim()) return fallback;
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -160,7 +203,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       // Real delivery requires host + credentials + an explicit From.
       configured: Boolean(smtpHost && smtpUser && smtpPass && env.EMAIL_FROM),
       host: smtpHost,
-      port: intEnv('SMTP_PORT', 587),
+      port: intEnv('SMTP_PORT', 587, env),
       secure: env.SMTP_SECURE === 'true',
       user: smtpUser,
       pass: smtpPass,
@@ -168,11 +211,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     },
     otp: {
       hashSecret: otpHashSecret,
-      ttlMs: intEnv('EMAIL_OTP_TTL_MINUTES', 10) * 60 * 1000,
-      maxAttempts: intEnv('EMAIL_OTP_MAX_ATTEMPTS', 5),
-      resendCooldownMs: intEnv('EMAIL_OTP_RESEND_COOLDOWN_SECONDS', 60) * 1000,
-      maxSendsPerEmailPerHour: intEnv('EMAIL_OTP_MAX_SENDS_PER_HOUR', 5),
-      maxSendsPerIpPerHour: intEnv('VERIFY_IP_MAX_SENDS_PER_HOUR', 20),
+      ttlMs: intEnv('EMAIL_OTP_TTL_MINUTES', 10, env) * 60 * 1000,
+      maxAttempts: intEnv('EMAIL_OTP_MAX_ATTEMPTS', 5, env),
+      resendCooldownMs: intEnv('EMAIL_OTP_RESEND_COOLDOWN_SECONDS', 60, env) * 1000,
+      maxSendsPerEmailPerHour: intEnv('EMAIL_OTP_MAX_SENDS_PER_HOUR', 5, env),
+      maxSendsPerIpPerHour: intEnv('VERIFY_IP_MAX_SENDS_PER_HOUR', 20, env),
     },
     account: {
       encryptionSecret: env.ACCOUNT_ENC_SECRET?.trim() ?? '',
@@ -196,17 +239,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
             ? {
                 url: env.SMS_HTTP_URL?.trim() ?? '',
                 token: env.SMS_HTTP_TOKEN ?? '',
-                timeoutMs: intEnv('SMS_HTTP_TIMEOUT_MS', 10000),
+                timeoutMs: intEnv('SMS_HTTP_TIMEOUT_MS', 10000, env),
               }
             : undefined,
-        timeoutMs: intEnv('SMS_TIMEOUT_MS', 10000),
+        timeoutMs: intEnv('SMS_TIMEOUT_MS', 10000, env),
       },
       whatsapp: {
         apiToken: env.WHATSAPP_GATEWAY_API_TOKEN?.trim() ?? '',
         phoneNumberId: env.WHATSAPP_GATEWAY_PHONE_NUMBER_ID?.trim() ?? '',
         baseUrl: env.WHATSAPP_GATEWAY_BASE_URL?.trim() || undefined,
         apiVersion: env.WHATSAPP_GATEWAY_API_VERSION?.trim() || undefined,
-        timeoutMs: intEnv('WHATSAPP_TIMEOUT_MS', 10000),
+        timeoutMs: intEnv('WHATSAPP_TIMEOUT_MS', 10000, env),
       },
       googleOauth: {
         enabled: env.GOOGLE_OAUTH_ENABLED?.trim() !== 'false',
@@ -221,10 +264,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
           env.GOOGLE_USERINFO_ENDPOINT?.trim() || 'https://openidconnect.googleapis.com/v1/userinfo',
         jwksUri: env.GOOGLE_JWKS_ENDPOINT?.trim() || 'https://www.googleapis.com/oauth2/v3/certs',
         issuer: env.GOOGLE_ISSUER?.trim() || 'https://accounts.google.com',
-        timeoutMs: intEnv('GOOGLE_OAUTH_TIMEOUT_MS', 8000),
-        stateTtlMs: intEnv('GOOGLE_STATE_TTL_MINUTES', 10) * 60 * 1000,
+        timeoutMs: intEnv('GOOGLE_OAUTH_TIMEOUT_MS', 8000, env),
+        stateTtlMs: intEnv('GOOGLE_STATE_TTL_MINUTES', 10, env) * 60 * 1000,
       },
-      sessionTtlMs: intEnv('ACCOUNT_SESSION_TTL_HOURS', 24) * 60 * 60 * 1000,
+      sessionTtlMs: intEnv('ACCOUNT_SESSION_TTL_HOURS', 24, env) * 60 * 60 * 1000,
       // SameSite=None cookies are only honored over HTTPS — force Secure on.
       sessionSecure:
         sessionSameSite === 'None' ? true : env.ACCOUNT_SESSION_SECURE !== 'false',
@@ -236,10 +279,34 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       baseUrl: env.AADHAAR_KYC_BASE_URL?.trim() ?? '',
       mobileLinkPath:
         env.AADHAAR_KYC_MOBILE_LINK_PATH?.trim() ?? '/api/v1/mobile-to-aadhaar/',
-      timeoutMs: intEnv('AADHAAR_KYC_TIMEOUT_MS', 20000),
+      timeoutMs: intEnv('AADHAAR_KYC_TIMEOUT_MS', 20000, env),
     },
     registry: {
       officerToken: env.REGISTRY_OFFICER_API_TOKEN ?? '',
+    },
+    officer: {
+      registrationCode: env.OFFICER_REGISTRATION_CODE?.trim() ?? '',
+    },
+    registration: {
+      aadhaarOcr: {
+        providerName: env.AADHAAR_OCR_PROVIDER?.trim() ?? '',
+        apiToken: env.AADHAAR_OCR_API_TOKEN?.trim() ?? '',
+        baseUrl: env.AADHAAR_OCR_BASE_URL?.trim() ?? '',
+        ocrPath: env.AADHAAR_OCR_PATH?.trim() ?? '',
+        timeoutMs: intEnv('AADHAAR_OCR_TIMEOUT_MS', 20000, env),
+      },
+      pincode: {
+        baseUrl: env.PINCODE_BASE_URL?.trim() || undefined,
+        timeoutMs: intEnv('PINCODE_TIMEOUT_MS', 8000, env),
+      },
+      geocoding: {
+        baseUrl: env.GEOCODING_BASE_URL?.trim() || undefined,
+        timeoutMs: intEnv('GEOCODING_TIMEOUT_MS', 8000, env),
+      },
+      disposableEmailExtraDomains: env.DISPOSABLE_EMAIL_BLOCK_LIST ?? '',
+      aadhaarDocumentMaxBytes: intEnv('AADHAAR_DOCUMENT_MAX_BYTES', 10 * 1024 * 1024, env),
+      photoMaxBytes: intEnv('REGISTRATION_PHOTO_MAX_BYTES', 8 * 1024 * 1024, env),
+      sessionTtlMs: intEnv('REGISTRATION_SESSION_TTL_MINUTES', 120, env) * 60 * 1000,
     },
   };
 }

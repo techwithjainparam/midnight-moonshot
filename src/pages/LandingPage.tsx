@@ -4,7 +4,7 @@ import PrivacyVisual from '../PrivacyVisual';
 import { useAuth } from '../auth/AuthContext';
 
 export default function LandingPage() {
-  const { status, wallet } = useAuth();
+  const { status } = useAuth();
 
   return (
     <div className="page landing-page">
@@ -39,15 +39,15 @@ export default function LandingPage() {
             </>
           ) : (
             <>
-              <button
-                className="btn btn-primary btn-lg"
-                onClick={wallet.connect}
-                disabled={wallet.walletState !== 'ready'}
-              >
-                {wallet.walletState === 'ready' ? 'Connect Wallet' : 'Detecting Wallet...'}
-              </button>
+              <Link to="/register-account" className="btn btn-primary btn-lg">
+                Create Account
+              </Link>
+              <Link to="/login" className="btn btn-ghost btn-lg">
+                Sign In
+              </Link>
               <p className="landing-connect-note">
-                Connect your wallet to access PRIESTATE.
+                No wallet connection needed to register — you connect your
+                Midnight wallet when you sign in.
               </p>
             </>
           )}
@@ -58,9 +58,10 @@ export default function LandingPage() {
         <div className="landing-flow-inner">
           <h2 className="landing-section-heading">Account Access</h2>
           <p className="landing-section-desc">
-            Get started with a PRIESTATE account. Registration and login check
-            your wallet first, never create a duplicate, and keep the officer
-            process entirely separate.
+            Create a PRIESTATE account without connecting a wallet — no wallet
+            address is collected. You connect your Midnight wallet when you sign
+            in to bind it to the account. Registration never creates a
+            duplicate, and the officer process stays entirely separate.
           </p>
 
           <div className="benefits-grid">
@@ -75,8 +76,9 @@ export default function LandingPage() {
                 User Registration
               </Link>
               <p className="benefit-desc">
-                Create your account: wallet check, details, required factors,
-                then a live camera and location identity check.
+                Create your account with no wallet involved, add your details,
+                and pass every real server-side verification gate. You connect
+                your Midnight wallet when you sign in.
               </p>
             </div>
 
@@ -91,8 +93,8 @@ export default function LandingPage() {
                 Login
               </Link>
               <p className="benefit-desc">
-                Sign in with your wallet, required factors, and password. A
-                separate face/liveness verification follows.
+                Choose your account type: a citizen multi-factor login, or a
+                server-backed officer sign-in.
               </p>
             </div>
 
@@ -102,12 +104,13 @@ export default function LandingPage() {
                   <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
                 </svg>
               </div>
-              <Link to="/officer" className="benefit-title">
-                Officer Registration / Login
+              <Link to="/login" className="benefit-title">
+                Officer Sign-In / Registration
               </Link>
               <p className="benefit-desc">
-                A separate, authorized officer portal. Normal users are never
-                granted officer privileges.
+                A separate, server-backed officer credential portal. Officer
+                registration is a one-time commissioning step; normal users are
+                never granted officer privileges.
               </p>
             </div>
           </div>

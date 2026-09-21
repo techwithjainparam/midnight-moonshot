@@ -7,25 +7,25 @@
 //
 //   * LIVENESS  — is a live person present? (this component reuses the camera
 //                 + the pure login-face state machine, NOT a fake boolean),
-//   * FACE MATCH — does the live face match a registered reference? (a real
-//                 `FaceVerificationProvider` boundary; never fabricated).
+//   * FACE MATCH — does the live face match a registered reference? (real
+//                 server-authoritative matching; never fabricated).
 //
 // Honesty / fail-closed behaviour:
-//   * This build ships NO real computer-vision provider and stores NO
-//     registered biometric reference (the Part 4 demo face-match is client-side
-//     and transient). The server reports `providerAvailable:false` and
-//     `hasReferenceIdentity:false`, so the stage can never reach
-//     `identity_verified` — it reports `verification_unavailable` honestly
-//     instead. There is no fake "faceMatched = true".
+//   * When the server reports `providerAvailable:true` AND
+//     `hasReferenceIdentity:true`, we run the REAL path: lazily load the
+//     face-api descriptor provider (detector + landmark + recognition nets,
+//     weights vendored under /models), capture a live frame, send the derived
+//     128-d embedding to the server's single-use verification endpoint, and map
+//     the server verdict — the ONLY path to `identity_verified`.
+//   * Otherwise (no provider, no reference, or the recognition model failed to
+//     load) the stage admits it cannot run and fails closed to
+//     `verification_unavailable`. There is no fake "faceMatched = true".
 //   * Camera permission is requested explicitly; all tracks are stopped on
 //     finish/unmount; every frame stays in memory and is never stored, logged,
 //     or uploaded.
 
 import { useState, useCallback, useEffect, useRef } from 'react';
-import {
-  IN_MEMORY_FACE_PROVIDER,
-  type FaceVerificationProvider,
-} from '../liveness/face-verification';
+import type { FaceMatchVerdict } from '../liveness/face-verification';
 import {
   createLoginFaceSession,
   transitionLoginFace,
@@ -39,20 +39,24 @@ import {
   cameraErrorMessage,
 } from '../liveness/camera-capture';
 import type { FaceVerificationSnapshot } from '../auth/account-types';
-import { faceVerificationStatus } from '../auth/account-types';
+import { faceVerificationStatus, isFaceVerificationCapable } from '../auth/account-types';
+import {
+  beginBiometricVerification,
+  completeBiometricVerification,
+} from '../auth/account-api';
 
 export interface LoginFaceVerificationProps {
   /** Server-authoritative face-verification stage snapshot. */
   readonly snapshot: FaceVerificationSnapshot | null;
-  /** A real provider, or the bundled fail-closed (no-capability) provider. */
-  readonly provider?: FaceVerificationProvider;
+  /** Wallet that is logging in (needed only for the real server path). */
+  readonly walletAddress?: string;
   /** Called with the stage outcome (pass only from a real provider match). */
   readonly onPassed?: () => void;
 }
 
 export default function LoginFaceVerification({
   snapshot,
-  provider = IN_MEMORY_FACE_PROVIDER,
+  walletAddress,
   onPassed,
 }: LoginFaceVerificationProps) {
   const [session, setSession] = useState<LoginFaceSession>(() =>
@@ -90,35 +94,96 @@ export default function LoginFaceVerification({
       setCamera(handle);
       update(transitionLoginFace(pendingRef.current, { type: 'camera_ready' }, Date.now()));
 
-      // 2) Capability discovery + reference presence (server-authoritative).
-      const hasReference = Boolean(snapshot?.hasReferenceIdentity && snapshot.providerAvailable);
-      const capable = provider.capabilities.size > 0 && provider.hasReferenceIdentity === hasReference;
+      // 2) Capability discovery is server-authoritative: the server tells us
+      //    whether a registered reference + provider exist. When it does we
+      //    proceed to the real descriptor path, which additionally verifies at
+      //    runtime that the models actually loaded before running the match.
+      const serverCapable = isFaceVerificationCapable(snapshot);
+      const hasReference = Boolean(serverCapable);
+      const capable = serverCapable;
+
       update(transitionLoginFace(pendingRef.current, {
         type: 'capabilities',
         capable,
         hasReference,
       }, Date.now()));
 
-      // 3) If the provider is actually capable + has a reference, run it; the
-      //    verdict is the ONLY honest way to reach identity_verified. In this
-      //    build the provider advertises NO capability, so the result is
-      //    `provider_unavailable` and the stage fails closed.
-      if (pendingRef.current.state === 'face_verification_in_progress') {
-        const result = provider.verify();
+      // 3) Real path: only a real provider with a registered reference can run.
+      if (pendingRef.current.state !== 'face_verification_in_progress') return;
+
+      // Lazy-load the real descriptor source (detector + landmark + recognition
+      // nets). The recognition weights are vendored under /models for this
+      // build; if for any reason they fail to load it fails closed to
+      // provider_unavailable — never a fabricated match.
+      const { realDescriptorProvider } = await import('../liveness/face-verification-real');
+      const descriptorSource = await realDescriptorProvider();
+      const ready = await descriptorSource.ensureReady();
+      if (!ready) {
         update(transitionLoginFace(pendingRef.current, {
           type: 'verification_result',
-          verdict: result.verdict,
+          verdict: 'provider_unavailable',
         }, Date.now()));
+        return;
       }
 
-      if (pendingRef.current.state === 'identity_verified') {
+      // 4) Capture a live frame and produce a real embedding.
+      const raw = handle.captureRaw(512);
+      const embedding = await descriptorSource.descriptor(raw);
+      if (!embedding) {
+        update(transitionLoginFace(pendingRef.current, {
+          type: 'verification_result',
+          verdict: 'no_face',
+        }, Date.now()));
+        return;
+      }
+
+      // 5) Server-authoritative match. The server owns the verdict — a client
+      //    "matched" claim is ignored. Fail closed on any server refusal.
+      let verdict: FaceMatchVerdict;
+      try {
+        if (!walletAddress) throw new Error('missing wallet');
+        const begin = await beginBiometricVerification(walletAddress);
+        if (!begin.ok) {
+          // The server refused to issue a verification session (unavailable /
+          // no reference / revoked / not-found) — fail closed.
+          verdict = mapServerVerdict(begin.reason);
+        } else {
+          const done = await completeBiometricVerification({
+            verificationToken: begin.data.token,
+            liveEmbedding: embedding,
+          });
+          if (!done.ok) {
+            // Server refused the verification session (e.g. session invalid,
+            // reference revoked, provider unavailable) — fail closed.
+            verdict = mapServerVerdict(done.message ?? 'provider_unavailable');
+          } else if (!done.data.ok) {
+            // Server ran the match but the verdict was not a match (mismatch,
+            // insufficient quality, etc.).
+            verdict = mapServerVerdict(done.data.verdict);
+          } else {
+            // Server matched (ok:true) — but keep through the mapper so the
+            // verdict surface stays exhaustive and closed.
+            verdict = mapServerVerdict(done.data.verdict);
+          }
+        }
+      } catch {
+        verdict = 'error';
+      }
+
+      const next = transitionLoginFace(pendingRef.current, {
+        type: 'verification_result',
+        verdict,
+      }, Date.now());
+      update(next);
+
+      if (next.state === 'identity_verified') {
         handle.stop();
         setCamera(null);
         onPassed?.();
       }
     };
     void run();
-  }, [snapshot, provider, onPassed]);
+  }, [snapshot, walletAddress, onPassed]);
 
   useEffect(() => {
     return () => {
@@ -268,5 +333,31 @@ function isFailure(state: LoginFaceStateName): boolean {
       return true;
     default:
       return false;
+  }
+}
+
+/**
+ * Map the server's verdict (or refusal) to the pure face-verification verdict
+ * surface. Any server refusal fails closed; the client never invents a match.
+ */
+function mapServerVerdict(input: string): FaceMatchVerdict {
+  switch (input) {
+    case 'matched':
+      return 'matched';
+    case 'mismatch':
+      return 'mismatch';
+    case 'insufficient_quality':
+      return 'insufficient_quality';
+    case 'no_reference':
+    case 'reference_revoked':
+    case 'revoked':
+    case 'provider_unavailable':
+    case 'unavailable':
+    case 'not-found':
+      return 'provider_unavailable';
+    case 'session_invalid':
+    case 'error':
+    default:
+      return 'error';
   }
 }

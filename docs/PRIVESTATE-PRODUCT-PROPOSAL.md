@@ -45,10 +45,10 @@ The combination means the ledger stores **who registered what and whether it pas
 
 The implemented, end-to-end product flow is:
 
-1. **Owner/Builder connects wallet.** The DApp connects to the Midnight wallet (DApp Connector v4.x) and joins the deployed Preprod contract via the fixed contract address.
-2. **Account registration and authentication.** The user registers a server-side account bound to their wallet address, then authenticates across the implemented factors (see sections 8 and 9).
+1. **Wallet-free account registration.** The user registers a server-side account through an 11-step stepper (`/register-account`) — personal + Aadhaar → Aadhaar document OCR → email → SMS OTP → WhatsApp OTP → Aadhaar-mobile link → password → photo → liveness → location → finalize. **No Midnight wallet address is required or typed at registration.**
+2. **Wallet association after registration.** After finalize, the citizen connects their real Midnight wallet to bind it to the account (`walletAddress`), then enrolls biometrics. Login/continuation uses the associated wallet.
 3. **Property registration application.** The owner submits a registration; the client persists safe public metadata that references the real on-chain registration id returned by a successful on-chain `submitRegistration`.
-4. **Registry/officer review.** The designated officer reviews submitted registrations in the review portal.
+4. **Registry/officer review.** The designated officer reviews submitted registrations in the review portal — gated by a server-backed officer credential (with a labelled demo fallback), not by a wallet.
 5. **Approval / rejection.** The officer authorizes an on-chain `approveRegistration` or `rejectRegistration`, which appends to the registration lifecycle and moves the record to its finalized state.
 6. **Verification / eligibility flow.** A caller runs the eligibility circuit against the deployed contract and receives a privacy-preserving Boolean result saved to `sessionStorage` and rendered on a result page.
 
@@ -114,12 +114,14 @@ Registration and login are each gated on a set of factors. All are server-valida
 
 | Factor | Status | Notes |
 |--------|--------|-------|
-| **Wallet** | REAL / COMPLETE | Wallet connection + account bound to a unique wallet address |
+| **Wallet** | REAL / COMPLETE | Wallet connection; account bound to an associated wallet address after wallet-free registration |
 | **Password** | REAL / COMPLETE | Salted scrypt hash, constant-time verify |
 | **SMS OTP / WhatsApp OTP** | PROVIDER-READY | Factor gating + server enforcement are real; actual SMS/WhatsApp delivery requires live gateway credentials |
 | **Google factor** | PROVIDER-READY | Factor boundary is implemented; live Google OAuth credentials are not shipped |
-| **Registration liveness** | FOUNDATION | Motion-only liveness flow; distinct from face matching |
-| **Login face verification** | PROVIDER-READY / NOT AVAILABLE | Provider boundary + fail-closed architecture (Part 6); no real CV bundled |
+| **Registration liveness** | REAL | Real 68-point face landmarks + blind blink/head/hand-up/finger-count/phrase challenges; not depth/replay-proof |
+| **Login face verification** | REAL | Real face-api inference (68-point landmarks + 128-d FaceNet embeddings), encrypted server-side reference store, server-authoritative matched/mismatch verdict |
+| **Live location** | REAL | Browser geolocation, client-side validation + server acceptance (fail-closed) |
+| **Officer credential** | REAL | Server-backed single-officer credential (commissioning code, separate session cookie); wallet-demo fallback clearly labelled |
 
 External/provider-dependent components are clearly labelled above. They are not claimed as production-integrated.
 
@@ -127,12 +129,14 @@ External/provider-dependent components are clearly labelled above. They are not 
 
 ## 9. Face verification status (accurate)
 
-- **Part 6 implements the provider boundary and fail-closed architecture.** The login face-verification stage runs through a state machine and a face provider boundary; when the provider is unavailable, it reports `provider_unavailable` honestly and never mints a session.
-- **No real CV/face library is currently bundled.** The implementation deliberately does not depend on an unaudited facial-recognition dependency.
-- **No legitimate registered biometric reference currently exists.** There is no enrolled, consented reference identity used for matching.
-- **The demo `src/verify/face-match.ts` is NOT a production biometric reference.** It is explicitly demo-only — a crude client-side perceptual similarity score whose UI must be labelled "Demo Identity Verification". It is not an authorized Aadhaar/UIDAI matcher.
-- **The system does not fabricate matches or scores.** No client-supplied `matched` / `score` assertion is accepted; the server remains the authority and returns no session/account when the face provider is unavailable.
-- **Aadhaar verification is not currently production-integrated.** The shipped path reports "Aadhaar-linked mobile verification is not available in this demo" when the verification server is unreachable.
+- **Part 6 implements a REAL login face-verification stage.** Login runs a mandatory multi-factor authentication (Wallet → Google → SMS OTP → WhatsApp OTP → Password) and then a distinct, explicit identity stage:
+  - **Liveness** answers *"is a real, live person in front of the camera?"* — real 68-point landmark inference (`@vladmandic/face-api`, served from `public/models/`) with blind blink/head challenges plus server-issued hand-up / finger-count / phrase challenges; fail-closed on model-load failure.
+  - **Face matching** answers *"does the live face match the registered identity reference?"* — the server derives a 128-d FaceNet embedding from real face-api captures, encrypts it at rest under a separate `ACCOUNT_BIOMETRIC_ENC_SECRET` (AES-256-GCM, domain-separated), and returns only a `matched`/`mismatch` verdict computed server-side (`server/account/biometric.ts`, `server/account/service.ts`). Single-use, wallet- and reference-version-bound tokens; any client-supplied `matched`/`score` is ignored.
+- Membership of `identityVerified=true` is set **only** by the server at successful biometric enrollment; the old bare-`confirmed:true` trust path was removed. `AccountService.login()` is the sole session-minting path.
+- Camera frames stay in memory; no face, embedding, or biometric value reaches the ledger, URLs, query params, logs, localStorage, or any public/account response (the server exposes only booleans/verdicts).
+- `src/verify/face-match.ts` remains a **demo-only** perceptual-similarity path and is **not** a production biometric reference — it is not used for the server-authoritative login verdict.
+- **Not yet production-integrated:** official UIDAI/authorized Aadhaar (KYC) verification. **Not yet claimed:** depth/silent-liveness and replay/photo/video anti-spoofing beyond the landmark challenges above.
+- **The system does not fabricate matches or scores.** No client-supplied `matched` / `score` assertion is accepted; the server remains the authority and returns no session/account when the face provider or reference is unavailable.
 
 ---
 
@@ -143,7 +147,15 @@ External/provider-dependent components are clearly labelled above. They are not 
 - **Approval / rejection** — only the designated officer (whose public key is sealed in the ledger) can run `approveRegistration` / `rejectRegistration`; decisions append to the lifecycle history.
 - **On-chain lifecycle** — `PENDING → APPROVED | REJECTED` is the source of truth on the ledger; the public registry shows only finalized (APPROVED) registrations.
 
-> **Label:** The current officer authorization is **demo-only**. `src/auth/roles.ts` treats configured `VITE_DEMO_OFFICER_ADDRESSES` as officers, or offers a client-side "Simulate Officer Sign-In (DEMO)". The README states this is client-side and trivially bypassable, shaping UI/UX only — a real deployment must replace it with authorized-officer credentials enforced by the responsible authority.
+> **Label:** Officer access to the review portal is **server-backed** (single
+> officer account minted once per deployment behind `OFFICER_REGISTRATION_CODE`,
+> separate `priestate_officer_sid` session cookie, salted-scrypt passwords;
+> checked first by `RequireOfficer`). A **clearly-labelled demo fallback**
+> remains: `src/auth/roles.ts` treats configured `VITE_DEMO_OFFICER_ADDRESSES`
+> as officers, or offers a client-side "Simulate Officer Sign-In (DEMO)". This
+> is an application credential, not government authentication — a real
+> deployment must integrate the responsible authority's identity system. The
+> on-chain approve/reject verdict is always enforced by the Compact circuit.
 
 ---
 
@@ -171,11 +183,11 @@ Derived from `package.json` and the repository layout:
 | Server-side accounts, sessions, scrypt passwords | REAL / COMPLETE | SQLite, AES-256-GCM PII at rest |
 | Registration / login factor gating | REAL / COMPLETE | Server-authoritative; session minting gated |
 | Privacy invariants | REAL / COMPLETE | `tests/account-privacy.test.ts` |
-| Registration liveness (motion) | FOUNDATION | Liveness flow only; not CV identity matching |
-| Login face verification | PROVIDER-READY / NOT AVAILABLE | Boundary + fail-closed; no CV/reference bundled |
+| Registration liveness | REAL | Real 68-point face-landmark challenges + server-issued hand-up / finger-count / phrase; not depth/replay-proof |
+| Login face verification | REAL | Real face-api inference + encrypted server-side reference store + server-authoritative verdict |
 | SMS / WhatsApp / Google factor delivery | PROVIDER-READY | Gating real; live credentials not shipped |
-| Officer authorization | DEMO | `src/auth/roles.ts`; client-side, README-labelled |
-| `src/verify/face-match.ts` | DEMO | Not a production biometric reference |
+| Officer authorization | REAL (server-backed) | `server/account/officer.ts` single-officer credential; wallet-demo fallback clearly labelled |
+| `src/verify/face-match.ts` | DEMO | Not used for the server-authoritative login verdict |
 | Aadhaar verification | NOT AVAILABLE | Reports unavailable in demo; not production-integrated |
 
 ---
@@ -185,9 +197,8 @@ Derived from `package.json` and the repository layout:
 Genuine, not-yet-implemented future work (none of these are claimed as done):
 
 - **Production identity / Aadhaar provider** — integrate an authorized KYC/eKYC gateway.
-- **Real CV / biometric provider** — adopt an audited facial-verification provider.
-- **Secure biometric reference enrollment** — a consented, protected enrollment flow with a legitimate stored reference.
-- **Production officer authorization** — replace demo role with authority-enforced credentials.
+- **Audited/commercial face provider + anti-spoofing** — the current biometric provider (`@vladmandic/face-api`) is real but not production-audited; depth/silent-liveness and replay/photo/video resistance are not claimed.
+- **Government/authority officer identity** — the server-backed officer credential is an application credential; integrating the responsible authority's identity system remains future work.
 - **Live OAuth / SMS / WhatsApp credentials** — enable real delivery for Google, SMS, and WhatsApp factors.
 - **Backend production deployment** — deploy the account/verification server so Level 3 server flows are reachable live.
 - **Stronger production operational controls** — real rate limiting, audit logging, key management, and secret rotation.
@@ -212,16 +223,16 @@ In short: the ledger records *whether* a low-knowledge claim holds and *who* aut
 What currently exists:
 
 - **Deployed frontend** — live at https://priestate.vercel.app (Vercel; reachable).
-- **Midnight Preprod deployment** — contract address `e5bddf519efe1ed61bf59c344e49c37340860fb99a60543056e97456224b5256` recorded in `.midnight-state.json` with a deployment-proof screenshot.
-- **Automated tests** — currently **407 tests passing** covering account, auth, privacy, liveness, face-verification, registration, registry, and officer paths (verified via `npm test`).
+- **Midnight Preprod deployment** — contract address `fe251d3c8c26ccd56255a636c205c6b804489dbbaf41ddf316244ceb7f3159c2` recorded in `.midnight-state.json` with a deployment-proof screenshot.
+- **Automated tests** — currently **436/436 tests passing** covering account, auth, privacy, liveness, face-verification, registration, registry, and officer paths (verified via `npm test`).
 - **CI pipeline** — `.github/workflows/ci.yml` runs compact compile, copy-circuits, typecheck, tests, and a production build on push/PR; README shows a CI badge.
 - **Demo video (Level 2)** — https://youtu.be/UQwleyyFHqQ.
 
 Known current limitations (accurate, not hidden):
 
-- Face verification is **provider-ready / not available** — no real CV, no legitimate biometric reference, no fabricated matches.
-- Aadhaar verification is **not production-integrated**.
-- Officer authorization is **demo-only**.
+- Face verification is **REAL for the current build** — real face-api (68-point landmarks + 128-d FaceNet embeddings), an encrypted server-side biometric reference store, and server-authoritative matched/mismatch login face matching (no client-asserted matches, no fabricated verdicts).
+- Aadhaar verification is **not production-integrated** (PROVIDER-READY; no UIDAI-authorized AUA connected).
+- Officer authorization is **server-backed** (real, primary) with a **clearly-labelled wallet-demo fallback**; it is an application credential, not government authentication.
 - The Level 3 backend server is **deployed on Railway** at https://backend-production-25553.up.railway.app and health-verified (HTTP 200); the live Vercel frontend at https://priestate.vercel.app is connected to it via `VITE_VERIFICATION_API_URL`. Server-side Level 3 flows therefore run against the live hosted instance, not only automated tests.
 - Google / SMS / WhatsApp live delivery credentials are not shipped.
 

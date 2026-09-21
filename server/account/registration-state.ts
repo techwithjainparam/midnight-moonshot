@@ -19,10 +19,10 @@ import type { AccountRecord } from './model.js';
 /** The ordered registration factor identifiers. */
 export type RegistrationFactor = 'wallet' | 'google' | 'sms' | 'whatsapp';
 
-/** Canonical registration factor order (also the UI step order). */
+/** Canonical REQUIRED registration factor order (also the UI step order).
+ * Google is optional and omitted from the REQUIRED chain. */
 export const REGISTRATION_FACTOR_ORDER: readonly RegistrationFactor[] = [
   'wallet',
-  'google',
   'sms',
   'whatsapp',
 ];
@@ -59,7 +59,7 @@ export function deriveRegistrationState(
   const smsVerified = record.smsOtpVerified;
   const whatsappVerified = record.whatsappOtpVerified;
 
-  const required = options.requiredFactors ?? ['wallet', 'google', 'sms', 'whatsapp'];
+  const required = options.requiredFactors ?? REGISTRATION_FACTOR_ORDER;
 
   const states: Record<RegistrationFactor, boolean> = {
     wallet: walletVerified,

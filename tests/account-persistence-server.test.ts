@@ -144,6 +144,28 @@ async function linkGoogleOverHttp(base: string, kit: GoogleTestKit, sid: string)
  * real embeddings). Replaces the removed bare `identity-verified` trust path.
  */
 async function fullyEnrollOverHttp(base: string, sid: string): Promise<void> {
+  // Part 9 hard-gate: enrollment requires the server-authoritative
+  // registration identity evidence (liveness + live location) to be accepted.
+  const evidence = await resp(
+    base,
+    '/api/v1/account/identity-evidence',
+    {
+      identityEvidence: {
+        context: 'registration',
+        livenessPassed: true,
+        location: {
+          latitude: 19.07,
+          longitude: 72.87,
+          accuracyMeters: 12,
+          timestampMs: Date.now(),
+          nonce: 'test-nonce',
+        },
+      },
+    },
+    `priestate_sid=${sid}`,
+  );
+  assert.equal(evidence.status, 200, 'identity evidence must be accepted');
+
   const begin = await resp(base, '/api/v1/account/biometric/enrollment/begin', {}, `priestate_sid=${sid}`);
   assert.equal(begin.status, 200);
   const token = begin.body.token as string;

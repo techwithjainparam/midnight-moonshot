@@ -65,6 +65,7 @@ export default function RegistrationLiveness({
   const [location, setLocation] = useState<LocationSession | null>(null);
   const [provider, setProvider] = useState<LandmarkProvider | null>(null);
   const [statusNote, setStatusNote] = useState<string | null>(null);
+  const [locationFailed, setLocationFailed] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const pendingSessionRef = useRef<LivenessSession>(session);
@@ -85,6 +86,7 @@ export default function RegistrationLiveness({
     setCameraError(null);
     setStatusNote(null);
     setLocation(null);
+    setLocationFailed(false);
 
     // 1. Load the real landmark provider; fail closed if it can't load.
     let prov: LandmarkProvider | null = null;
@@ -111,7 +113,8 @@ export default function RegistrationLiveness({
     pendingSessionRef.current = transitionLiveness(s, { type: 'start' }, Date.now());
     tracksRef.current = {};
 
-    // 2. Start the camera and the location watcher together.
+    // 2. Start the camera. Location is NOT requested yet — the geolocation gate
+    //    begins only after liveness has genuinely passed (see the location effect).
     try {
       const handle = await requestCamera();
       setCamera(handle);
@@ -134,15 +137,6 @@ export default function RegistrationLiveness({
       pendingSessionRef.current = s2;
       return;
     }
-
-    // 3. Begin the mandatory location watch (independent signal).
-    const loc = createLocationWatcher();
-    locationRef.current = { state: 'requesting', evidence: null, message: null };
-    setLocation(locationRef.current);
-    loc.start();
-    setLocation(loc.getState());
-    // Keep the watcher handle for cleanup on unmount/expiry.
-    locationHandleRef.current = loc;
   }, [challengeCount]);
 
   // Process each frame: quality gate → landmark challenge → state machine.
@@ -186,8 +180,9 @@ export default function RegistrationLiveness({
       next = transitionLiveness(next, { type: 'frame', observation: { motionDetected: completed, motionMagnitude: completed ? 0.5 : 0 } }, Date.now());
     }
     if (next.state === 'liveness_passed') {
-      // The separate `session`-watching effect performs the final pass gate
-      // (it re-checks the live location fix); all we do here is persist state.
+      // The separate location-gate effect performs the final pass decision
+      // (it starts the location watcher and waits for a live fix); all we do
+      // here is persist state.
       setSession(next);
       pendingSessionRef.current = next;
       return;
@@ -240,19 +235,43 @@ export default function RegistrationLiveness({
     return () => window.clearInterval(id);
   }, [camera, onFrame]);
 
-  // Once liveness AND a live, fresh location fix both hold → pass. This also
-  // completes the flow if location arrives AFTER liveness already passed.
+  // STRICTLY AFTER LIVENESS gate: the user is only asked for their location
+  // once liveness has genuinely passed. On the first `liveness_passed` render
+  // we create + start the watcher, then poll it until an active fresh fix
+  // (→ finish pass) or a terminal location failure (→ fail closed with retry).
+  // The watcher is stopped via `finish`, retry, and unmount.
   useEffect(() => {
     if (finishedRef.current) return;
     pendingSessionRef.current = session;
-    if (session.state === 'liveness_passed') {
+    if (session.state !== 'liveness_passed') return;
+
+    if (!locationHandleRef.current) {
+      const loc = createLocationWatcher();
+      locationHandleRef.current = loc;
+      locationRef.current = { state: 'requesting', evidence: null, message: null };
+      setLocation(locationRef.current);
+      loc.start();
+      setLocation(loc.getState());
+    }
+
+    const id = window.setInterval(() => {
+      if (finishedRef.current) return;
       const loc = locationHandleRef.current?.getState();
-      if (loc && loc.state === 'active' && loc.evidence) {
+      if (!loc || loc.state === 'inactive') return;
+      setLocation(loc);
+      if (loc.state === 'active' && loc.evidence) {
         void finish(true);
         return;
       }
-      if (loc) setStatusNote('Liveness confirmed. Finalising location…');
-    }
+      if (isTerminalLocationState(loc.state)) {
+        setStatusNote(
+          'Your location could not be verified, so identity verification cannot complete.',
+        );
+        finish(false);
+      }
+    }, 250);
+
+    return () => window.clearInterval(id);
   }, [session, finish]);
 
   // Unmount cleanup: stop camera + location watcher.
@@ -279,6 +298,7 @@ export default function RegistrationLiveness({
     setCameraError(null);
     setLocation(null);
     setStatusNote(null);
+    setLocationFailed(false);
     void start();
   }, [camera, start]);
 
@@ -300,9 +320,9 @@ export default function RegistrationLiveness({
     <section className="liveness-card" aria-label="Live identity check">
       <h2 className="liveness-title">Live Identity Check</h2>
       <p className="liveness-subtitle">
-        This requires a live face, and your permission for both your camera and
-        your current location. A static photo, replay, or faked report cannot
-        pass.
+        This requires a live face and a genuinely fresh location fix. Your
+        location is only requested AFTER your liveness passes. A static photo,
+        replay, or faked report cannot pass.
       </p>
 
       <div className="liveness-preview">
@@ -392,12 +412,34 @@ export default function RegistrationLiveness({
       {isFailureOutcome(session) && (
         <button type="button" className="btn btn-ghost" onClick={() => void retry()}>Retry</button>
       )}
+      {locationFailed && (
+        <div className="status-msg error" role="alert">
+          Location is required to complete identity verification, but your location
+          could not be confirmed. No check was faked. You can retry.
+        </div>
+      )}
+      {locationFailed && (
+        <button type="button" className="btn btn-ghost" onClick={() => void retry()}>Retry</button>
+      )}
     </section>
   );
 }
 
 function isFailureOutcome(session: LivenessSession): boolean {
   return session.finalOutcome !== null && session.state !== 'liveness_passed';
+}
+
+const TERMINAL_LOCATION_STATES: readonly LocationSessionState[] = [
+  'location_denied',
+  'location_unavailable',
+  'location_timeout',
+  'location_stale',
+  'location_invalid_cache',
+  'location_accuracy_insufficient',
+];
+
+function isTerminalLocationState(state: LocationSessionState): boolean {
+  return TERMINAL_LOCATION_STATES.includes(state);
 }
 
 function locationMessage(state: LocationSessionState): string {

@@ -71,9 +71,14 @@ interface InternalState {
 
 /**
  * Create a live location verifier bound to the given geolocation API (defaults
- * to `navigator.geolocation`). Returns a handle with `getState()`, `start()`
- * and `stop()`; `stop()` is idempotent and clears the underlying watcher, so
- * callers MUST call it on completion / failure / cancel / unmount / expiry.
+ * to `navigator.geolocation` in a browser; injectable for tests). Returns a
+ * handle with `getState()`, `start()` and `stop()`; `stop()` is idempotent and
+ * clears the underlying watcher, so callers MUST call it on completion /
+ * failure / cancel / unmount / expiry.
+ *
+ * Without a usable geolocation API (no browser, insecure context, or explicit
+ * injection of `undefined`) it stays `inactive` — the location gate FAILS
+ * CLOSED and is never faked.
  */
 export function createLocationWatcher(
   options: LocationWatcherOptions = {},
@@ -83,7 +88,11 @@ export function createLocationWatcher(
   stop: () => void;
 } {
   const cfg = { ...DEFAULT_LOCATION_CONFIG, ...options.config };
-  const geo: GeoApi | undefined = options.geolocation;
+  const geo: GeoApi | undefined =
+    options.geolocation ??
+    (typeof navigator !== 'undefined' && navigator.geolocation
+      ? (navigator.geolocation as unknown as GeoApi)
+      : undefined);
   const state: InternalState = {
     session: EMPTY,
     watchId: null,

@@ -5,7 +5,6 @@ import { useAuth } from '../auth/AuthContext';
 import {
   demoFaceMatch,
   computeReferenceSignature,
-  projectDemoEmbedding,
   demoResultLabel,
   type DemoFaceMatchResult,
 } from '../verify/face-match';
@@ -16,20 +15,18 @@ import {
   type MobileSession,
 } from '../verify/mobile-session';
 import { markClientIdentityVerified } from '../auth/account-store';
-import {
-  beginBiometricEnrollment,
-  completeBiometricEnrollment,
-} from '../auth/account-api';
 
 // FEATURE 5 — Demo Identity Verification (`/identity-verification`).
 //
 // Clearly-labelled DEMO verification: capture a document/reference photo and a
 // live selfie, then run the demo face-match fully client-side. Images are
-// processed in memory and never stored or uploaded; only a boolean outcome is
-// sent to the server. This is NOT an official Aadhaar/UIDAI verification and
-// must never be presented as one. Desktop camera is preferred; when no camera
-// is available the user can continue on their phone via a short-lived,
-// single-use carry-over link (no PII in the QR/URL).
+// processed in memory and never stored or uploaded, and no outcome is sent to
+// the server. This is NOT an official Aadhaar/UIDAI verification and must
+// never be presented as one — server-side `identityVerified` can only be set
+// by real biometric enrollment, which is reserved for the real registration
+// flow. Desktop camera is preferred; when no camera is available the user can
+// continue on their phone via a short-lived, single-use carry-over link (no
+// PII in the QR/URL).
 
 type Step = 'reference' | 'selfie' | 'match';
 
@@ -116,30 +113,14 @@ export default function IdentityVerificationPage() {
     setBusy(true);
     setError(null);
     try {
-      // Part 8: the insecure "client says confirmed:true" path was removed.
-      // identityVerified can now only be set server-side through REAL biometric
-      // enrollment. This demo runs that real flow with a clearly-labelled
-      // server-side-enforced consent step.
-      const begin = await beginBiometricEnrollment();
-      if (!begin.ok) {
-        setError(begin.message ?? 'Could not start biometric enrollment. Try again.');
-        return;
-      }
-      const demoEmbedding = await projectDemoEmbedding(selfieData);
-      // The server enforces consent + requires >=3 usable frames. Send the
-      // single-use token and explicit consent; the server does the rest and
-      // never trusts a client "matched"/"score".
-      const r = await completeBiometricEnrollment({
-        token: begin.data.token,
-        consent: true,
-        embeddings: [demoEmbedding, demoEmbedding, demoEmbedding, demoEmbedding],
-      });
-      if (!r.ok) {
-        setError(r.message ?? 'Could not record the verification outcome. Try again.');
-        return;
-      }
+      // Part 8 + 9: identity verification can only be set server-side through
+      // REAL biometric enrollment gated on server-accepted registration
+      // identity evidence. This standalone demo page is clearly labelled a
+      // DEMO: it performs ONLY the client-side demo face match and records a
+      // local demo flag. It never calls the real biometric enrollment
+      // endpoints, which remain reserved for the real registration flow.
       markClientIdentityVerified(address);
-      navigate('/login', { replace: true });
+      navigate('/login/user', { replace: true });
     } finally {
       setBusy(false);
     }
@@ -402,7 +383,7 @@ function MatchStep({
       <div className="profile-done-actions" style={{ marginTop: '1rem' }}>
         {result.ok && (
           <button className="btn btn-primary btn-lg" disabled={busy} onClick={onConfirm}>
-            {busy ? 'Recording…' : 'Confirm verification & continue'}
+            {busy ? 'Finishing…' : 'Finish & verify locally (DEMO)'}
           </button>
         )}
         <button className="btn btn-ghost" onClick={onRetry}>Retry selfie</button>

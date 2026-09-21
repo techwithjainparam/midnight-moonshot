@@ -260,3 +260,16 @@ export function loginAccount(
 ): Promise<AccountApiResult<{ session: { accountId: string } }>> {
   return api('/v1/account/login', { walletAddress, password });
 }
+
+/**
+ * POST /api/v1/account/wallet/associate — bind the citizen's real Midnight
+ * wallet to a wallet-free account (created by the registration stepper) and
+ * re-mint the session cookie so it carries the wallet. This is the "connect
+ * your wallet after registration" step and MUST complete before biometric
+ * enrollment.
+ */
+export function associateWalletWithAccount(walletAddress: string): Promise<
+  AccountApiResult<{ account: PublicAccountView }>
+> {
+  return api('/v1/account/wallet/associate', { walletAddress });
+}

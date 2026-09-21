@@ -13,7 +13,8 @@ export { SESSION_COOKIE_NAME }; // re-export for convenience
 
 export interface AuthenticatedUser {
   readonly accountId: string;
-  readonly walletAddress: string;
+  /** Null until the account's Midnight wallet is associated. */
+  readonly walletAddress: string | null;
 }
 
 /** Augmented request type carrying the authenticated user. */

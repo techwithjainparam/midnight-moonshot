@@ -12,7 +12,7 @@ import type { AccountStore } from './store.js';
 
 interface Row {
   account_id: string;
-  wallet_address: string;
+  wallet_address: string | null;
   password_hash: string;
   password_salt: string;
   pii_ciphertext: string;
@@ -22,11 +22,14 @@ interface Row {
   whatsapp_otp_verified: number;
   google_linked: number;
   identity_verified: number;
+  email_verified: number;
+  email_verified_at: number | null;
   biometric_reference_ciphertext: string | null;
   biometric_reference_version: number | null;
   biometric_enrolled_at: number | null;
   biometric_consent_at: number | null;
   biometric_revoked_at: number | null;
+  identity_evidence_accepted_at: number | null;
   created_at: number;
 }
 
@@ -43,11 +46,14 @@ function rowToRecord(r: Row): AccountRecord {
     whatsappOtpVerified: r.whatsapp_otp_verified === 1,
     googleLinked: r.google_linked === 1,
     identityVerified: r.identity_verified === 1,
+    emailVerified: r.email_verified === 1,
+    emailVerifiedAt: r.email_verified_at ?? null,
     biometricReferenceCipherText: r.biometric_reference_ciphertext ?? null,
     biometricReferenceVersion: r.biometric_reference_version ?? null,
     biometricEnrolledAt: r.biometric_enrolled_at ?? null,
     biometricConsentAt: r.biometric_consent_at ?? null,
     biometricRevokedAt: r.biometric_revoked_at ?? null,
+    identityEvidenceAcceptedAt: r.identity_evidence_accepted_at ?? null,
     createdAt: r.created_at,
   };
 }
@@ -65,11 +71,14 @@ function recordToRow(r: AccountRecord): Row {
     whatsapp_otp_verified: r.whatsappOtpVerified ? 1 : 0,
     google_linked: r.googleLinked ? 1 : 0,
     identity_verified: r.identityVerified ? 1 : 0,
+    email_verified: r.emailVerified ? 1 : 0,
+    email_verified_at: r.emailVerifiedAt ?? null,
     biometric_reference_ciphertext: r.biometricReferenceCipherText ?? null,
     biometric_reference_version: r.biometricReferenceVersion ?? null,
     biometric_enrolled_at: r.biometricEnrolledAt ?? null,
     biometric_consent_at: r.biometricConsentAt ?? null,
     biometric_revoked_at: r.biometricRevokedAt ?? null,
+    identity_evidence_accepted_at: r.identityEvidenceAcceptedAt ?? null,
     created_at: r.createdAt,
   };
 }
@@ -84,16 +93,20 @@ export class SqliteAccountStore implements AccountStore {
         (account_id, wallet_address, password_hash, password_salt,
          pii_ciphertext, masked_mobile, masked_aadhaar,
          sms_otp_verified, whatsapp_otp_verified, google_linked,
-         identity_verified, biometric_reference_ciphertext,
+         identity_verified, email_verified, email_verified_at,
+         biometric_reference_ciphertext,
          biometric_reference_version, biometric_enrolled_at,
-         biometric_consent_at, biometric_revoked_at, created_at)
+         biometric_consent_at, biometric_revoked_at,
+         identity_evidence_accepted_at, created_at)
       VALUES
         (@account_id, @wallet_address, @password_hash, @password_salt,
          @pii_ciphertext, @masked_mobile, @masked_aadhaar,
          @sms_otp_verified, @whatsapp_otp_verified, @google_linked,
-         @identity_verified, @biometric_reference_ciphertext,
+         @identity_verified, @email_verified, @email_verified_at,
+         @biometric_reference_ciphertext,
          @biometric_reference_version, @biometric_enrolled_at,
-         @biometric_consent_at, @biometric_revoked_at, @created_at)
+         @biometric_consent_at, @biometric_revoked_at,
+         @identity_evidence_accepted_at, @created_at)
     `);
     this._selectByWallet = this.db.prepare(
       'SELECT * FROM accounts WHERE wallet_address = ?',
@@ -110,7 +123,9 @@ export class SqliteAccountStore implements AccountStore {
   private readonly _selectAll: Database.Statement;
 
   create(record: AccountRecord): AccountRecord {
-    if (this.getByWallet(record.walletAddress)) {
+    // getByWallet(NULL) matches nothing in SQLite, so a null-wallet account
+    // (wallet-free registration) never collides with an existing wallet.
+    if (record.walletAddress !== null && this.getByWallet(record.walletAddress)) {
       throw new Error(`AccountStore: wallet already registered: ${record.walletAddress}`);
     }
     this._insert.run(recordToRow(record));
@@ -149,11 +164,14 @@ export class SqliteAccountStore implements AccountStore {
       whatsappOtpVerified: 'whatsapp_otp_verified',
       googleLinked: 'google_linked',
       identityVerified: 'identity_verified',
+      emailVerified: 'email_verified',
+      emailVerifiedAt: 'email_verified_at',
       biometricReferenceCipherText: 'biometric_reference_ciphertext',
       biometricReferenceVersion: 'biometric_reference_version',
       biometricEnrolledAt: 'biometric_enrolled_at',
       biometricConsentAt: 'biometric_consent_at',
       biometricRevokedAt: 'biometric_revoked_at',
+      identityEvidenceAcceptedAt: 'identity_evidence_accepted_at',
       createdAt: 'created_at',
     };
 
@@ -172,6 +190,14 @@ export class SqliteAccountStore implements AccountStore {
     ).run({ ...values, wallet_address: walletAddress });
 
     return this.getByWallet(walletAddress);
+  }
+
+  setWalletAddress(accountId: string, walletAddress: string): AccountRecord | null {
+    this.db.prepare('UPDATE accounts SET wallet_address = ? WHERE account_id = ?').run(
+      walletAddress,
+      accountId,
+    );
+    return this.getById(accountId);
   }
 
   list(): AccountRecord[] {

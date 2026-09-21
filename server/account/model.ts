@@ -31,6 +31,8 @@ export interface AccountPiiInput {
   readonly pincode?: string;
   readonly dateOfBirth: string; // ISO yyyy-mm-dd
   readonly mobileE164: string;
+  /** Verified (post-OTP) registration email; encrypted like the rest of the PII. */
+  readonly email?: string;
 }
 
 /** Public-safe projection of an account (what the browser/server may expose). */
@@ -42,7 +44,7 @@ export interface PublicAccountView {
     | 'whatsapp_otp_pending'
     | 'google_pending'
     | 'identity_verified';
-  readonly walletAddress: string;
+  readonly walletAddress: string | null;
   readonly fullName?: string;
   /** Masked mobile, e.g. +91 98••••••10 — never the full number. */
   readonly maskedMobile: string;
@@ -51,6 +53,7 @@ export interface PublicAccountView {
   readonly smsOtpVerified: boolean;
   readonly whatsappOtpVerified: boolean;
   readonly googleLinked: boolean;
+  readonly emailVerified: boolean;
   readonly identityVerified: boolean;
   readonly createdAt: number;
   /**
@@ -82,7 +85,7 @@ export interface FaceVerificationSnapshot {
 /** The on-disk / in-store account record. */
 export interface AccountRecord {
   readonly accountId: string;
-  readonly walletAddress: string;
+  readonly walletAddress: string | null;
   /** salted scrypt hash — the ONLY representation of the password. */
   readonly passwordHash: string;
   readonly passwordSalt: string;
@@ -94,6 +97,10 @@ export interface AccountRecord {
   readonly whatsappOtpVerified: boolean;
   readonly googleLinked: boolean;
   readonly identityVerified: boolean;
+  /** True once the registration email address was OTP-verified by the server. */
+  readonly emailVerified: boolean;
+  /** Unix ms when the registration email was verified; null until verified. */
+  readonly emailVerifiedAt: number | null;
   readonly createdAt: number;
   /**
    * Encrypted biometric reference (AES-256-GCM, SEPARATE key derived from
@@ -109,11 +116,19 @@ export interface AccountRecord {
   readonly biometricConsentAt: number | null;
   /** Unix ms when the reference was revoked; null = not revoked. */
   readonly biometricRevokedAt: number | null;
+  /**
+   * Unix ms when the server accepted the combined registration identity
+   * evidence (real landmark liveness + live browser location) for this
+   * account. Null until registration identity evidence passes the server
+   * validator. Enrollment of a biometric reference is gated on this having
+   * been set — a bare client boolean can never satisfy it.
+   */
+  readonly identityEvidenceAcceptedAt: number | null;
 }
 
 /** What the registration endpoint accepts from the browser. */
 export interface AccountRegistrationInput {
-  readonly walletAddress: string;
+  readonly walletAddress: string | null;
   readonly fullName: string;
   readonly aadhaarNumber: string;
   readonly addressOnAadhaar?: string;
@@ -191,6 +206,18 @@ export function maskAadhaar(aadhaar: string): string {
   const digits = aadhaar.replace(/\D/g, '');
   if (digits.length < 4) return '••••';
   return `•••• ${digits.slice(-4)}`;
+}
+
+/** Mask an email for display: j•o••@example.com — never the full address. */
+export function maskEmail(email: string): string {
+  const at = email.indexOf('@');
+  if (at <= 0) return '••••';
+  const local = email.slice(0, at);
+  const domain = email.slice(at + 1);
+  const head = local[0] ?? '';
+  const tail = local.length > 1 ? local.slice(-1) : '';
+  const dots = local.length > 2 ? new Array(Math.min(local.length - 2, 4)).fill('•').join('') : '';
+  return `${head}${dots}${tail}@${domain}`;
 }
 
 /**
@@ -275,6 +302,7 @@ export function toPublicAccountView(record: AccountRecord): PublicAccountView {
     smsOtpVerified: record.smsOtpVerified,
     whatsappOtpVerified: record.whatsappOtpVerified,
     googleLinked: record.googleLinked,
+    emailVerified: record.emailVerified,
     identityVerified: record.identityVerified,
     createdAt: record.createdAt,
     enrollmentState: recordIdentityEnrollmentState(record),
@@ -394,7 +422,6 @@ export function rejectIdentityEvidence(
 
 function deriveAccountStatus(record: AccountRecord): PublicAccountView['status'] {
   if (record.identityVerified) return 'identity_verified';
-  if (!record.googleLinked) return 'google_pending';
   if (!record.smsOtpVerified) return 'sms_otp_pending';
   if (!record.whatsappOtpVerified) return 'whatsapp_otp_pending';
   return 'registered';

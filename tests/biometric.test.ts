@@ -431,6 +431,20 @@ function registerFully(harness: Harness): string {
     password: 'Str0ng#Pass',
     passwordConfirm: 'Str0ng#Pass',
   });
+  // Record the server-authoritative registration identity evidence gate so the
+  // account is eligible for biometric enrollment (Part 9 hard-gate).
+  const evidence = harness.svc.recordIdentityEvidence(wallet, {
+    context: 'registration',
+    livenessPassed: true,
+    location: {
+      latitude: 19.07,
+      longitude: 72.87,
+      accuracyMeters: 12,
+      timestampMs: Date.now(),
+      nonce: 'test-nonce',
+    },
+  });
+  assert.ok(evidence.ok, 'identity evidence accepted');
   return wallet;
 }
 

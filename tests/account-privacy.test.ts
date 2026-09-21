@@ -223,7 +223,10 @@ test('recordIdentityEvidence accepts only validated evidence and stores no raw c
   const addr = '0x' + 'b'.repeat(64);
   const rr = service.register({ ...validPayload(), walletAddress: addr });
   assert.equal(rr.ok, true);
-  const ok = service.recordIdentityEvidence(addr, validEvidence());
+  const fresh = validEvidence({
+    location: { ...validEvidence().location, timestampMs: Date.now() },
+  });
+  const ok = service.recordIdentityEvidence(addr, fresh);
   assert.equal(ok.ok, true);
   if (ok.ok) assert.equal(ok.accepted, true);
   const store = (service as unknown as { store: InstanceType<typeof InMemoryAccountStore> }).store;
@@ -257,7 +260,7 @@ test('Part 7 liveness/location modules never persist raw frames, landmarks, or c
     'indexer',
     'toJSON',
   ];
-  for (const rel of ['landmark.ts', 'landmark-verifier.ts', 'location.ts', 'location-watcher.ts', 'landmark-provider.ts']) {
+  for (const rel of ['landmark.ts', 'landmark-verifier.ts', 'location.ts', 'location-watcher.ts', 'landmark-provider.ts', 'hand.ts', 'hand-provider.ts']) {
     const text = readFileSync(new URL(rel, dir), 'utf8');
     for (const kw of forbidden) {
       assert.ok(

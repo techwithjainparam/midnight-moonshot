@@ -4,9 +4,10 @@
  * browser's lazy-loaded landmark provider (`src/liveness/landmark-provider.ts`)
  * can fetch them over HTTP at runtime.
  *
- * Only the two networks PRIVESTATE uses are copied — the TinyFaceDetector and
- * the TinyFaceLandmark68 net — which together are ~270KB. The larger
- * recognition / full landmark / expression models are intentionally NOT copied.
+ * Three networks are copied — the TinyFaceDetector, the TinyFaceLandmark68
+ * net, and the FaceRecognitionNet (the recognition weights powering the real
+ * 128-d face embedding used by the Level 3 biometric verification stage).
+ * All three are fetched lazily at runtime by the browser providers.
  *
  * Source files: node_modules/@vladmandic/face-api/model/<name>[-weights_manifest.json | .bin]
  * Target:       public/models/<name>[-weights_manifest.json | .bin]
@@ -30,7 +31,11 @@ const sourceDir = path.join(
 );
 const targetDir = path.join(projectRoot, 'public', 'models');
 
-const MODELS = ['tiny_face_detector_model', 'face_landmark_68_tiny_model'] as const;
+const MODELS = [
+  'tiny_face_detector_model',
+  'face_landmark_68_tiny_model',
+  'face_recognition_model',
+] as const;
 
 if (!existsSync(sourceDir)) {
   throw new Error(

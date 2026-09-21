@@ -19,7 +19,8 @@ export const SESSION_TOKEN_BYTES = 32;
 export interface Session {
   readonly sessionId: string;
   readonly accountId: string;
-  readonly walletAddress: string;
+  /** Null until the account's Midnight wallet is associated. */
+  readonly walletAddress: string | null;
   readonly createdAt: number;
   readonly expiresAt: number;
 }
@@ -27,7 +28,7 @@ export interface Session {
 interface SessionRow {
   session_id: string;
   account_id: string;
-  wallet_address: string;
+  wallet_address: string | null;
   created_at: number;
   expires_at: number;
 }
@@ -86,7 +87,7 @@ export class SessionService {
   }
 
   /** Create a new session, return the token and the Set-Cookie header value. */
-  create(accountId: string, walletAddress: string): {
+  create(accountId: string, walletAddress: string | null): {
     session: Session;
     cookieHeader: string;
   } {

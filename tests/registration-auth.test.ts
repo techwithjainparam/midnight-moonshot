@@ -339,7 +339,7 @@ test('a fresh account is `wallet` verified only and never reported complete', ()
   assert.equal(state.smsVerified, false);
   assert.equal(state.whatsappVerified, false);
   assert.equal(state.complete, false);
-  assert.equal(state.nextPendingFactor, 'google');
+  assert.equal(state.nextPendingFactor, 'sms');
 });
 
 test('registration state machine reaches `complete` only after every factor', async () => {

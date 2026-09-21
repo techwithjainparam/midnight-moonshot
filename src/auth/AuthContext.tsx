@@ -10,21 +10,36 @@
 //
 //   role        USER | OFFICER (only meaningful when connected)
 //
+//   officerAuthorized   true only when the server confirms a valid
+//                       `priestate_officer_sid` session cookie. This is
+//                       the PRIMARY gate for RequireOfficer; the wallet-based
+//                       `isOfficer` remains for the demo fallback.
+//
 // Route guards and the navbar consume this context so that wallet state
 // is evaluated in exactly one place.
 
-import { createContext, useContext, useMemo, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useWallet, type UseWalletReturn } from '../hooks/useWallet';
 import { determineRole, type Role } from './roles';
+import { fetchOfficerMe, logoutOfficer as apiLogoutOfficer, type OfficerCapabilities } from './officer-api';
 
 export type AuthStatus = 'loading' | 'disconnected' | 'connected';
 
 export interface AuthContextValue {
   status: AuthStatus;
   role: Role | null;
+  /** Wallet-based demo officer flag (allow-list or explicit demo grant). */
   isOfficer: boolean;
+  /** Server-backed: true only when the server confirms a valid officer session cookie. */
+  officerAuthorized: boolean;
+  /** Server capabilities snapshot (null until fetched). */
+  officerCapabilities: OfficerCapabilities | null;
   address: string | null;
   wallet: UseWalletReturn;
+  /** Re-check the server officer session (call after officer login/register/logout). */
+  refreshOfficerAuth: () => Promise<void>;
+  /** Log out the server officer session and clear local state. */
+  officerLogout: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -44,9 +59,37 @@ function toAuthStatus(walletState: UseWalletReturn['walletState']): AuthStatus {
   }
 }
 
+/**
+ * Try to validate the server-backed officer session cookie on mount. This is
+ * a lightweight check that does not block rendering — it fires in the
+ * background and updates state once the server responds.
+ */
+function useServerOfficerAuth() {
+  const [officerAuthorized, setOfficerAuthorized] = useState(false);
+  const [officerCapabilities, setOfficerCapabilities] = useState<OfficerCapabilities | null>(null);
+
+  const refreshOfficerAuth = useCallback(async () => {
+    const result = await fetchOfficerMe();
+    setOfficerAuthorized(result.ok);
+    if (result.ok) setOfficerCapabilities(result.data.capabilities);
+  }, []);
+
+  const officerLogout = useCallback(async () => {
+    await apiLogoutOfficer();
+    setOfficerAuthorized(false);
+  }, []);
+
+  useEffect(() => {
+    void refreshOfficerAuth();
+  }, [refreshOfficerAuth]);
+
+  return { officerAuthorized, officerCapabilities, refreshOfficerAuth, officerLogout };
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const wallet = useWallet();
   const status = toAuthStatus(wallet.walletState);
+  const serverOfficer = useServerOfficerAuth();
 
   const value = useMemo<AuthContextValue>(() => {
     const connected = status === 'connected' && wallet.address !== null;
@@ -55,10 +98,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       status,
       role,
       isOfficer: role === 'OFFICER',
+      officerAuthorized: serverOfficer.officerAuthorized,
+      officerCapabilities: serverOfficer.officerCapabilities,
       address: connected ? wallet.address : null,
       wallet,
+      refreshOfficerAuth: serverOfficer.refreshOfficerAuth,
+      officerLogout: serverOfficer.officerLogout,
     };
-  }, [status, wallet]);
+  }, [status, wallet, serverOfficer]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

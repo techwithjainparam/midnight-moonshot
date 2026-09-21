@@ -1,23 +1,24 @@
 // PRIESTATE — Route guard for the Officer Portal.
 //
-// Behavior:
-// - authorization state loading → render NOTHING (no officer data is
-//   exposed before authorization is confirmed)
-// - disconnected → connect gate (same as protected user routes)
-// - connected as USER → "Unauthorized — Officer access required."
-// - connected as OFFICER (demo authorization) → render children
+// Authorization hierarchy:
+//   1. Server-backed officer credential (`priestate_officer_sid` HttpOnly
+//      cookie, validated by the server) — PRIMARY gate, checked first.
+//   2. Wallet-based demo officer grant (allow-list or session-scoped
+//      simulation) — DEMO FALLBACK, clearly labelled.
 //
-// Officer role determination is centralized in src/auth/roles.ts and is
-// a DEMO mechanism, not production government authentication.
+// If neither holds, the user sees an honest "Officer access required" page
+// with both options explained. No real officer data is ever exposed before
+// authorization is confirmed.
 
 import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { useAuth } from '../../auth/AuthContext';
 import { grantDemoOfficer, revokeDemoOfficer, hasDemoOfficerGrant } from '../../auth/roles';
 import { ConnectGate } from './RequireWallet';
+import { Link } from 'react-router-dom';
 
 function UnauthorizedOfficer() {
-  const { wallet } = useAuth();
+  const { wallet, officerAuthorized } = useAuth();
   const [simulated, setSimulated] = useState(hasDemoOfficerGrant);
 
   return (
@@ -30,37 +31,45 @@ function UnauthorizedOfficer() {
             <line x1="12" y1="17" x2="12.01" y2="17"/>
           </svg>
         </div>
-        <h1 className="auth-gate-title">Unauthorized — Officer access required.</h1>
+        <h1 className="auth-gate-title">Officer access required.</h1>
         <p className="auth-gate-desc">
-          Your connected wallet does not have authorized officer credentials.
-          No officer data is shown.
+          No valid server-backed officer credential was found for this
+          browser, and no demo officer role is active. No officer data is
+          shown.
         </p>
 
+        {!officerAuthorized && (
+          <div className="auth-gate-actions">
+            <Link to="/officer/login" className="btn btn-primary">
+              Officer Sign-In (Server Credential)
+            </Link>
+            <Link to="/officer/register" className="btn btn-ghost">
+              Register Officer (One-Time Setup)
+            </Link>
+          </div>
+        )}
+
         <div className="auth-gate-demo">
-          <p className="auth-gate-demo-label">DEMO SIMULATION — not real authentication</p>
-          <p className="auth-gate-demo-text">
-            Real government authentication does not exist yet. To exercise the
-            Officer Portal UX you can simulate officer authorization for this
-            browser session, or set <code>VITE_DEMO_OFFICER_ADDRESSES</code> to
-            your wallet address at build time.
-          </p>
+          <p className="auth-gate-demo-label">DEMO FALLBACK — not real authentication</p>
+        <p className="auth-gate-demo-text">
+          When no server-backed officer credential is available (or the
+          server reports registration unavailable), you can exercise the
+          Officer Portal UX by simulating the officer role for this browser
+          session. This is labelled and easy to revoke. This is not a
+          government identity system. Real government authentication does not exist yet — the
+          server-backed credential is an application credential only.
+        </p>
           {simulated ? (
             <button
               className="btn btn-ghost"
-              onClick={() => {
-                revokeDemoOfficer();
-                setSimulated(false);
-              }}
+              onClick={() => { revokeDemoOfficer(); setSimulated(false); }}
             >
               Revoke Demo Officer Role
             </button>
           ) : (
             <button
               className="btn btn-ghost"
-              onClick={() => {
-                grantDemoOfficer();
-                setSimulated(true);
-              }}
+              onClick={() => { grantDemoOfficer(); setSimulated(true); }}
             >
               Simulate Officer Sign-In (DEMO)
             </button>
@@ -80,11 +89,16 @@ interface RequireOfficerProps {
 }
 
 export default function RequireOfficer({ children }: RequireOfficerProps) {
-  const { status, isOfficer } = useAuth();
+  const { status, isOfficer, officerAuthorized } = useAuth();
 
   if (status === 'loading') return null;
   if (status === 'disconnected') return <ConnectGate />;
-  if (!isOfficer) return <UnauthorizedOfficer />;
 
-  return <>{children}</>;
+  // PRIMARY: server-backed officer credential (checked first).
+  if (officerAuthorized) return <>{children}</>;
+
+  // DEMO FALLBACK: wallet-based demo officer grant (clearly labelled).
+  if (isOfficer) return <>{children}</>;
+
+  return <UnauthorizedOfficer />;
 }

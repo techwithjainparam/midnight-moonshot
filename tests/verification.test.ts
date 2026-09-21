@@ -577,7 +577,18 @@ test('[api] unconfigured features respond 503 with honest unavailability message
       emailOtp: false,
       aadhaarMobile: false,
       registry: false,
+      registration: {
+        smsConfigured: false,
+        whatsappConfigured: false,
+        emailConfigured: false,
+        aadhaarOcrConfigured: false,
+        aadhaarMobileConfigured: false,
+        pincodeConfigured: true,
+        geocodingConfigured: true,
+        passwordRecoveryConfigured: false,
+      },
       account: { smsOtp: false, whatsappOtp: false, google: false },
+      officer: { registration: false, login: true },
     });
 
     const email = await getJson(`${base}/api/v1/email/send-otp`, {
@@ -612,7 +623,18 @@ test('[api] full email OTP round trip — the code exists ONLY in the inbox, nev
       emailOtp: true,
       aadhaarMobile: false,
       registry: false,
+      registration: {
+        smsConfigured: false,
+        whatsappConfigured: false,
+        emailConfigured: true,
+        aadhaarOcrConfigured: false,
+        aadhaarMobileConfigured: false,
+        pincodeConfigured: true,
+        geocodingConfigured: true,
+        passwordRecoveryConfigured: true,
+      },
       account: { smsOtp: false, whatsappOtp: false, google: false },
+      officer: { registration: false, login: true },
     });
     assert.equal(health.headers.get('access-control-allow-origin'), 'http://localhost:3000');
 

@@ -25,6 +25,8 @@ export interface AccountStore {
   getById(accountId: string): AccountRecord | null;
   /** Update a record (by wallet address) with a partial patch. */
   update(walletAddress: string, patch: Partial<Omit<AccountRecord, 'accountId' | 'walletAddress'>>): AccountRecord | null;
+  /** Bind (or re-bind) an accountId to a wallet address. */
+  setWalletAddress(accountId: string, walletAddress: string): AccountRecord | null;
   /** List all accounts (for administrative/testing introspection). */
   list(): AccountRecord[];
 }
@@ -37,11 +39,14 @@ export class InMemoryAccountStore implements AccountStore {
   private readonly byId = new Map<string, AccountRecord>();
 
   create(record: AccountRecord): AccountRecord {
-    if (this.byWallet.has(record[KEY])) {
+    if (record[KEY] !== null && this.byWallet.has(record[KEY])) {
       // Duplicate wallet: refuse to silently overwrite.
       throw new Error(`AccountStore: wallet already registered: ${record[KEY]}`);
     }
-    this.byWallet.set(record[KEY], record);
+    // Accounts created without a wallet (wallet-free registration) are keyed
+    // only by accountId; `null` is never a real wallet so it must never live in
+    // the wallet index and must never collide with a differently-keyed account.
+    if (record[KEY] !== null) this.byWallet.set(record[KEY], record);
     this.byId.set(record.accountId, record);
     return record;
   }
@@ -52,6 +57,17 @@ export class InMemoryAccountStore implements AccountStore {
 
   getById(accountId: string): AccountRecord | null {
     return this.byId.get(accountId) ?? null;
+  }
+
+  setWalletAddress(accountId: string, walletAddress: string): AccountRecord | null {
+    const existing = this.byId.get(accountId);
+    if (!existing) return null;
+    const oldWallet = existing.walletAddress;
+    if (oldWallet !== null) this.byWallet.delete(oldWallet);
+    const next: AccountRecord = { ...existing, walletAddress };
+    this.byWallet.set(walletAddress, next);
+    this.byId.set(accountId, next);
+    return next;
   }
 
   update(
@@ -67,7 +83,7 @@ export class InMemoryAccountStore implements AccountStore {
   }
 
   list(): AccountRecord[] {
-    return [...this.byWallet.values()];
+    return [...this.byId.values()];
   }
 }
 

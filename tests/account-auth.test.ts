@@ -95,6 +95,20 @@ async function fullyVerify(
 
 /** Part 8: real server-side biometric enrollment (single-use token + embeddings). */
 function fullyEnroll(service: AccountService): void {
+  // Part 9 hard-gate: biometric enrollment requires the server-authoritative
+  // registration identity evidence to have been accepted first.
+  const evidence = service.recordIdentityEvidence(WALLET, {
+    context: 'registration',
+    livenessPassed: true,
+    location: {
+      latitude: 19.07,
+      longitude: 72.87,
+      accuracyMeters: 12,
+      timestampMs: Date.now(),
+      nonce: 'test-nonce',
+    },
+  });
+  assert.equal(evidence.ok, true, 'identity evidence accepted');
   const begin = service.beginBiometricEnrollment(WALLET);
   assert.equal(begin.ok, true);
   assert.ok('token' in begin);

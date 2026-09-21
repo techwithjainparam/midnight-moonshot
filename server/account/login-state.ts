@@ -31,10 +31,10 @@ import type { AccountRecord } from './model.js';
 /** The ordered login factor identifiers (excluding the terminal Complete). */
 export type LoginFactor = 'wallet' | 'google' | 'sms' | 'whatsapp';
 
-/** Canonical login factor order (also the UI step order). */
+/** Canonical REQUIRED login factor order (also the UI step order). Google is
+ * optional and therefore omitted from the REQUIRED chain. */
 export const LOGIN_FACTOR_ORDER: readonly LoginFactor[] = [
   'wallet',
-  'google',
   'sms',
   'whatsapp',
 ];

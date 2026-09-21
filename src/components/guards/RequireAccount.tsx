@@ -6,8 +6,8 @@
 // - connected and this wallet has a fully-verified Level 3 account →
 //   render children
 // - connected but account is missing or not fully verified → redirect to
-//   /login (which routes on to /register-account or /identity-verification
-//   as needed)
+//   /login/user (which routes on to /register-account or
+//   /identity-verification as needed)
 //
 // Note: the authoritative multi-factor enforcement lives on the verification
 // server; this gate is a UX convenience like the other demo guards.
@@ -24,7 +24,7 @@ export default function RequireAccount({ children }: { children: ReactNode }) {
   if (status === 'loading') return null;
   if (status === 'disconnected') return <ConnectGate />;
   if (!address || !isAccountFullyVerified(getAccount(address))) {
-    return <Navigate to="/login" replace />;
+    return <Navigate to="/login/user" replace />;
   }
   return <>{children}</>;
 }
