@@ -8,11 +8,17 @@ A Midnight-based DApp that lets a property owner register a parcel on-chain and 
 
 ---
 
-## 1. Product name
+## 1. What is the product, and who uses it?
 
 - **Product:** PRIVESTATE
 - **Full title:** Privacy-Preserving Property / Land Registration & Verification DApp
 - **One-liner:** Register property on the Midnight ledger and prove eligibility in zero knowledge — without exposing the property's value or the registrant's identity to the public.
+
+**Who uses it:**
+
+- **Property owners / applicants** — register a parcel on-chain and later prove an eligibility condition (e.g. `propertyValue >= eligibilityThreshold`) without publishing the property value.
+- **Designated registry officers** — review submitted registrations and authorize `approve` / `reject` on-chain (a single server-backed officer credential per deployment).
+- **Verifiers / counterparties** — read the public Boolean `eligibilityResult` from the ledger to confirm a property met the threshold, without seeing the underlying value.
 
 ---
 
@@ -81,7 +87,32 @@ Raw names, full addresses, contact details, government-issued identifiers, passw
 
 ---
 
-## 6. Midnight integration
+## 6. Data model
+
+The ledger and server-side stores expose only these data points:
+
+| Data Point | Type | Disclosed To |
+| ---------- | ---- | ------------ |
+| `propertyValue` | `Uint<64>` private witness | Nowhere — used only inside the circuit |
+| `applicantSecretKey` | `Bytes<32>` private witness | Nowhere |
+| `officerSecretKey` | `Bytes<32>` private witness | Nowhere |
+| `eligibilityThreshold` | `Uint<64>` sealed ledger | Public (Midnight ledger) |
+| `officer` | `Bytes<32>` sealed ledger | Public (Midnight ledger) |
+| `registration.owner` | `Bytes<32>` (derived DApp public key) | Public (Midnight ledger) |
+| `registration.area` | `Uint<64>` | Public (Midnight ledger) |
+| `registration.district` | `Bytes<32>` | Public (Midnight ledger) |
+| `registration.status` | `RegistrationStatus` enum | Public (Midnight ledger) |
+| `registration.submittedAt` | `Uint<64>` | Public (Midnight ledger) |
+| `registration.reviewedBy` | `Bytes<32>` | Public (Midnight ledger) |
+| `registration.reviewedAt` | `Uint<64>` | Public (Midnight ledger) |
+| `registrationCounter` | `Counter` | Public (Midnight ledger) |
+| `eligibilityResult` | `Boolean` | Public (Midnight ledger) — Boolean only |
+| Account password | scrypt digest (salted) | Server only |
+| PII (name, address, contact) | AES-256-GCM ciphertext at rest | Server only (masked fragments exposed) |
+| Face image / biometric embedding | In-memory / AES-256-GCM at rest | Server only (verdict booleans only) |
+| Aadhaar number | Never stored — provider receipt only | Not stored / not disclosed |
+
+## 7. Midnight integration
 
 Only the actually implemented Compact/ZK functionality is described here. Midnight is used as a verifiable computation + public-record layer, **not** as an off-the-shelf database.
 
@@ -92,9 +123,21 @@ Only the actually implemented Compact/ZK functionality is described here. Midnig
 
 The repository compiles the contract via `npm run compile` and manages the resulting artifacts under `contracts/managed/priestate`.
 
+## 8. Why Midnight specifically?
+
+Midnight is the right chain for this product because it is the only chain, among those targeted here, that provides:
+
+- **Native ZK computation with a public, authenticable result.** `checkEligibility` proves `propertyValue >= eligibilityThreshold` inside a Compact circuit and discloses only the Boolean result on the ledger — a verifiable computation layer, not a database.
+- **Private witnesses + public record.** The contract keeps `propertyValue`, `applicantSecretKey`, and `officerSecretKey` as private witnesses while publishing only derived keys and the eligibility Boolean, matching the product's "proves without revealing" requirement.
+- **Sealed ledger + designated-authority model.** Sealing `eligibilityThreshold` and `officer` at deployment and re-deriving the caller key from a secret witness inside the circuit gives a privacy-preserving authority pattern (`approve`/`reject`) that a plain public ledger cannot express.
+- **DApp Connector + `midnight-js`.** The browser wallet proves and submits directly (`midnight-js-*` providers with the wallet's built-in proving provider), and the same SDK drives the deployment script — so the deployed Preprod instance is the real contract, not a stand-in.
+- **Preprod network fit.** The contract is live on Midnight Preprod at `fe251d3c8c26ccd56255a636c205c6b804489dbbaf41ddf316244ceb7f3159c2`, which is exactly the network this Level 3 build targets.
+
+No fictional "why Midnight" is claimed: the reasons above map to implemented modules and the deployed contract.
+
 ---
 
-## 7. Security architecture
+## 9. Security architecture
 
 - **Wallet binding** — registrations and lifecycle changes bind to keys derived from wallet secrets; an account is bound to a unique `walletAddress`.
 - **Password hashing** — salted scrypt with memory-hard cost parameters; verification is constant-time (`timingSafeEqual`) and never reveals why a check failed.
@@ -108,7 +151,7 @@ The repository compiles the contract via `npm run compile` and manages the resul
 
 ---
 
-## 8. Level 3 authentication (implemented)
+## 10. Level 3 authentication (implemented)
 
 Registration and login are each gated on a set of factors. All are server-validated; the components themselves are as follows:
 
@@ -127,7 +170,7 @@ External/provider-dependent components are clearly labelled above. They are not 
 
 ---
 
-## 9. Face verification status (accurate)
+## 11. Face verification status (accurate)
 
 - **Part 6 implements a REAL login face-verification stage.** Login runs a mandatory multi-factor authentication (Wallet → Google → SMS OTP → WhatsApp OTP → Password) and then a distinct, explicit identity stage:
   - **Liveness** answers *"is a real, live person in front of the camera?"* — real 68-point landmark inference (`@vladmandic/face-api`, served from `public/models/`) with blind blink/head challenges plus server-issued hand-up / finger-count / phrase challenges; fail-closed on model-load failure.
@@ -140,7 +183,7 @@ External/provider-dependent components are clearly labelled above. They are not 
 
 ---
 
-## 10. Property registry workflow
+## 12. Property registry workflow
 
 - **Registration submission** — owner submits on-chain; a server-side applicant-scoped endpoint persists only safe public metadata (reference id + optional name/village/etc.) tied to a real on-chain registration id. It never sends the confidential property value or a fabricated status/verdict.
 - **Officer review** — a review portal presents submitted registrations to the designated officer.
@@ -159,7 +202,7 @@ External/provider-dependent components are clearly labelled above. They are not 
 
 ---
 
-## 11. Technology stack
+## 13. Technology stack
 
 Derived from `package.json` and the repository layout:
 
@@ -171,7 +214,7 @@ Derived from `package.json` and the repository layout:
 
 ---
 
-## 12. Current implementation status
+## 14. Current implementation status
 
 | Feature | Status | Notes |
 |---------|--------|-------|
@@ -192,7 +235,21 @@ Derived from `package.json` and the repository layout:
 
 ---
 
-## 13. Roadmap
+## 15. Mainnet Feasibility
+
+The same Compact contract and Midnight.js SDK target the Midnight mainnet; no protocol feature used here is preprod-only. Moving to mainnet requires:
+
+- **Re-deploy the contract** on mainnet (`npm run deploy -- --network mainnet`) and publish the new contract address; the sealed `eligibilityThreshold` / `officer` must be chosen at that deploy.
+- **Funded mainnet wallets** with real NIGHT/DUST for submission and lifecycle transactions.
+- **Mainnet indexer/RPC endpoints** (`VITE_NETWORK_ID=mainnet` + corresponding URLs); the browser joins the deployed address exactly as it does on Preprod.
+- **Production server flows** — the account/verification server, real SMS/WhatsApp/email providers, authorized Aadhaar/KYC provider, and a real officer/authority identity boundary.
+- **Operational controls** — key management, secret rotation, rate limiting, audit logging, and monitoring; today only the (already-deployed) Preprod instance exists.
+
+Nothing in the contract (`checkEligibility`, sealed `officer` authorization, registry lifecycle) is Preprod-specific, so mainnet is a configuration + deployment + credential change rather than an architecture change. No mainnet deployment is claimed in this build.
+
+---
+
+## 16. Roadmap
 
 Genuine, not-yet-implemented future work (none of these are claimed as done):
 
@@ -205,7 +262,7 @@ Genuine, not-yet-implemented future work (none of these are claimed as done):
 
 ---
 
-## 14. Level 3 value proposition
+## 17. Level 3 value proposition
 
 PRIVESTATE demonstrates meaningful privacy-preserving blockchain usage rather than using the ledger as a database:
 
@@ -218,7 +275,7 @@ In short: the ledger records *whether* a low-knowledge claim holds and *who* aut
 
 ---
 
-## 15. Demo / submission readiness (current evidence only)
+## 18. Demo / submission readiness (current evidence only)
 
 What currently exists:
 

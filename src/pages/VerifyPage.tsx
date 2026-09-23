@@ -141,7 +141,15 @@ export default function VerifyPage() {
               <div className="verify-req-row">
                 <span className="verify-req-label">Eligibility Threshold</span>
                 <span className="verify-req-value">
+                  <span className="public-badge">PUBLIC</span>{' '}
                   {Number(property.eligibilityThreshold).toLocaleString()}
+                </span>
+              </div>
+              <div className="verify-req-row">
+                <span className="verify-req-label">Disclosure After Proof</span>
+                <span className="verify-req-value">
+                  <span className="proved-badge">PROVED</span>{' '}
+                  <span className="public-badge">PUBLIC</span> Boolean result only
                 </span>
               </div>
             </div>

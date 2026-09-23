@@ -119,6 +119,7 @@ export default function RegistryPage() {
                 <article key={p.id} className="property-card" aria-label={`Registration ${p.id}`}>
                   <div className="property-card-top">
                     <div className="property-card-type">On-chain</div>
+                    <span className="public-badge">PUBLIC</span>
                     <span className={`property-card-status ${p.statusClass}`}>{p.statusLabel}</span>
                   </div>
 

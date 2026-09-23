@@ -109,7 +109,15 @@ export default function ResultPage() {
               <div className="result-field">
                 <span className="result-field-label">Verification Status</span>
                 <span className={`result-field-value ${isEligible ? 'text-success' : 'text-muted'}`}>
-                  {isEligible ? 'Eligible' : 'Not Eligible'}
+                  {isEligible ? 'Eligible' : 'Not Eligible'}{' '}
+                  <span className="proved-badge">PROVED</span>
+                </span>
+              </div>
+              <div className="result-field">
+                <span className="result-field-label">On-chain Disclosure</span>
+                <span className="result-field-value">
+                  <span className="public-badge">PUBLIC</span> Boolean eligibility
+                  result only — never the property value
                 </span>
               </div>
               <div className="result-field">

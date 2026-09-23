@@ -4,7 +4,9 @@
 
 Privacy-first dApp built on Midnight, evolving from a Compact smart contract to a production-ready Web3 application.
 
-## PRIESTATE — Privacy-First Property Eligibility Proof
+## What This Does
+
+**PRIESTATE — Privacy-First Property Eligibility Proof**
 
 A technical privacy prototype (not a land registry, legal ownership system, or marketplace). PRIESTATE lets a user **privately prove that a property value meets a predefined eligibility threshold without revealing the actual property value**.
 
@@ -95,7 +97,7 @@ Approved / Rejected (on-chain lifecycle)          ←─────────
 
 https://priestate.vercel.app
 
-## Deployment
+## Preprod Contract Address
 
 The **PRIESTATE Compact contract** is deployed on the **Midnight Preprod** network:
 
@@ -129,9 +131,65 @@ The **property value** (`propertyValue`) and the relevant private secrets — th
 
 A user **proves** `propertyValue >= eligibilityThreshold` **without revealing the actual property value**. Only the eligibility result (true/false) becomes public on the ledger; the underlying property value stays private forever.
 
+## Privacy Claim
+
+PRIESTATE discloses only the Boolean `eligibilityResult` on the Midnight ledger for an eligibility check — never the `propertyValue`, the applicant secret key, or the officer secret key. Raw PII, passwords, face images, and biometric embeddings are stored off-ledger (server-side only, encrypted at rest) or never persisted at all. Any UI claim in this build is grounded in the deployed Compact contract; there are no fabricated verification pass/fail verdicts.
+
 ## Demo Video
 
 https://youtu.be/UQwleyyFHqQ
+
+## Tech Stack
+
+* **Frontend:** Vite 8, React 19, React Router, TypeScript
+* **Zero-knowledge:** Compact contract (`contracts/priestate.compact`), `compact` CLI, managed artifacts in `contracts/managed/priestate`
+* **Midnight SDK:** `@midnight-ntwrk/compact-runtime` 0.16, `midnight-js-*` modules (fetch ZK config, indexer public-data, level private-state, node ZK config), DApp Connector API v4.x
+* **Wallet:** `@midnight-ntwrk/wallet-sdk` (CLI deploy) + any DApp Connector v4.x wallet (browser)
+* **Backend:** Node.js server (`server/index.ts`), `ws`, `nodemailer`
+* **Storage:** SQLite (`better-sqlite3`)
+* **Crypto:** Node `crypto` (scrypt, AES-256-GCM), `@scure/bip39`, `@scure/base`
+* **CI/CD:** GitHub Actions (`node 22` → compact compile → tests → build)
+
+## Prerequisites
+
+* Node.js **22+** and npm
+* The `compact` CLI toolchain (0.5.1 CLI / 0.31.1 toolchain), installed manually — see `.github/workflows/ci.yml`
+* A Midnight DApp Connector v4.x wallet (Lace, 1AM, ...) for browser flows
+* Docker Desktop (only for the local Midnight **proof server** used by CLI deployment)
+* `.env` from `.env.example` (secrets are read server-side only)
+
+## Setup & Run Locally
+
+```bash
+cp .env.example .env         # then fill in server-side credentials
+npm install
+npm run compile              # compact compile -> contracts/managed/priestate
+npm run copy-circuits        # copy ZK artifacts to public/
+npm run dev                  # Vite dev server on port 3000 (proxy: /api -> :8787)
+```
+
+To run the verification server:
+
+```bash
+set -a; source .env; set +a # no dotenv loader; env must be sourced
+npm run verify-server        # verification API on :8787
+```
+
+## Run Tests
+
+```bash
+npm test                     # 436/436 passing (contract, auth, privacy, registry, officer, etc.)
+npm run typecheck            # tsc --noEmit
+npm run build                # typecheck + production build
+```
+
+## CI/CD
+
+`.github/workflows/ci.yml` runs on **push to `main`** and **pull requests**: checkout → Node.js 22 → pinned compact toolchain install → `npm run compile` → `npm run copy-circuits` → `npm run typecheck` → `npm test` → `npm run build`. Status: [CI badge](https://github.com/techwithjainparam/midnight-moonshot/actions/workflows/ci.yml).
+
+## Product Proposal
+
+[PRIVESTATE Product Proposal](docs/PRIVESTATE-PRODUCT-PROPOSAL.md) — product, why Midnight, data model, mainnet feasibility.
 
 ## Smart Contract
 
