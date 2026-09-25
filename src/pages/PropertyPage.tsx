@@ -1,5 +1,6 @@
 import { useParams, Link } from 'react-router-dom';
 import ProductBanner from '../components/ProductBanner';
+import { useAuth } from '../auth/AuthContext';
 import { usePriestateRegistrations } from '../hooks/usePriestateRegistrations';
 import { toRegistrationDetail } from '../registration-view';
 
@@ -14,7 +15,10 @@ const UNAVAILABLE = 'Unavailable';
 
 export default function PropertyPage() {
   const { id } = useParams<{ id: string }>();
-  const { connectState, connectError, registrations } = usePriestateRegistrations();
+  // Reuse the shared auth wallet so no second detection/connect instance is
+  // created for this page.
+  const { wallet } = useAuth();
+  const { connectState, connectError, registrations } = usePriestateRegistrations(1_000_000n, wallet);
 
   const lookup =
     id !== undefined && /^\d+$/.test(id)

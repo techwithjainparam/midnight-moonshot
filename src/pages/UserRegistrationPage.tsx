@@ -8,11 +8,13 @@ import ServerRegistrationLiveness, {
 } from '../components/ServerRegistrationLiveness';
 import { maskAadhaar } from '../auth/account-types';
 import {
-  REGISTRATION_STEP_ORDER,
-  REGISTRATION_STEP_LABELS,
+  REGISTRATION_STAGE_LABELS,
+  REGISTRATION_STAGE_ORDER,
   currentRegistrationStep,
+  stageOfStep,
   type RegistrationCapabilities,
   type RegistrationLivenessEvidenceInput,
+  type RegistrationStage,
   type RegistrationStatus,
   type RegistrationStep,
 } from '../auth/registration-types';
@@ -42,7 +44,7 @@ import { createLocationWatcher } from '../liveness/location-watcher';
 import type { LocationSessionState } from '../liveness/location-watcher';
 import type { LocationEvidence } from '../liveness/location';
 import { associateWalletWithAccount } from '../auth/account-api';
-import { useWallet } from '../hooks/useWallet';
+import { useAuth } from '../auth/AuthContext';
 
 // PRIESTATE — Secure user registration (`/register-account`), Part 1 flow.
 //
@@ -97,7 +99,10 @@ export default function UserRegistrationPage() {
   const [stepBusy, setStepBusy] = useState(false);
 
   // ── Post-finalize wallet association (connect the REAL Midnight wallet) ──
-  const wallet = useWallet();
+  // The wallet is the SHARED auth instance — no second detection/connect is
+  // ever created here, so the account flow never opens duplicate wallet
+  // prompts or ends up out of sync with the rest of the app.
+  const { wallet } = useAuth();
   const [walletAssociated, setWalletAssociated] = useState(false);
   const [associateBusy, setAssociateBusy] = useState(false);
   const [associateError, setAssociateError] = useState<string | null>(null);
@@ -146,13 +151,17 @@ export default function UserRegistrationPage() {
     (async () => {
       setLoading(true);
       setStartupError(null);
-      const capsRes = await fetchRegistrationCapabilities();
+      // Capabilities and resume-state are independent reads — fetch them in
+      // parallel so boot never waits on two round-trips serially.
+      const [capsRes, st] = await Promise.all([
+        fetchRegistrationCapabilities(),
+        fetchRegistrationStatus(),
+      ]);
       if (!cancelled && capsRes.ok) setCaps(capsRes.data.capabilities);
 
       // No wallet is involved: if a previous registration left a live
       // `priestate_reg_sid` cookie, resume it; otherwise the user starts the
       // personal step below (which mints the cookie on submit).
-      const st = await fetchRegistrationStatus();
       if (cancelled) return;
       if (!st.ok) {
         // A missing OR stale registration cookie is NOT an error: the server
@@ -338,7 +347,11 @@ export default function UserRegistrationPage() {
                 <>
                   <div className="account-card-actions">
                     <button className="btn btn-primary btn-lg" onClick={wallet.connect} disabled={wallet.walletState !== 'ready'}>
-                      {wallet.walletState === 'ready' ? 'Connect Wallet' : 'Detecting wallet…'}
+                      {wallet.walletState === 'ready'
+                        ? 'Connect Wallet'
+                        : wallet.walletState === 'connecting'
+                          ? 'Connecting…'
+                          : 'Detecting wallet…'}
                     </button>
                   </div>
                   {wallet.error && <div className="status-msg error" role="alert">{wallet.error}</div>}
@@ -397,29 +410,31 @@ export default function UserRegistrationPage() {
       <div className="page-header">
         <h1 className="page-title">Create Your PRIESTATE Account</h1>
         <p className="page-desc" style={{ maxWidth: 700 }}>
-          Registration is a real, server-driven stepper — and it never needs a
-          wallet. No wallet address is typed anywhere. After account creation you
-          connect your real Midnight wallet to bind it to the account. Your
-          password is stored only as a salted hash, raw PII and the Aadhaar
-          document extraction are encrypted at rest on the verification server,
-          and nothing ever reaches the ledger. A step whose real provider is not
-          configured fails closed — it is never faked or skipped.
+          Your account is created in a few short steps — and it never needs a
+          wallet. We verify your details with real government data and secure
+          the account with strong checks; your password is stored only as a
+          salted hash, your documents are encrypted at rest, and nothing reaches
+          the public ledger. A verification that is genuinely unavailable is
+          never faked or skipped — you will see a clear message and can try again.
         </p>
       </div>
 
-      <StepRail step={step} />
+      <StageRail stage={stageOfStep(step)} />
 
       <div className="account-card">
         {stepError && <div className="status-msg error" role="alert">{stepError}</div>}
 
         {step === 'personal' && (
           <section className="account-section">
-            <h2 className="account-section-title">Identity & Contact</h2>
+            <div className="account-stage-eyebrow">
+              Step {REGISTRATION_STAGE_ORDER.indexOf('personal') + 1} of {REGISTRATION_STAGE_ORDER.length} — {REGISTRATION_STAGE_LABELS.personal}
+            </div>
+            <h2 className="account-section-title">Your Personal Details</h2>
             <p className="account-section-desc">
-              The server verifies your pincode against India Post and stores
-              these details only as an encrypted blob on the verification
-              server. Raw Aadhaar is never kept — only a masked fragment. No
-              wallet address is needed or collected.
+              Enter the details exactly as they appear on your Aadhaar. Your
+              pincode is checked against real India Post data, and your details
+              are stored only as an encrypted record — never on a public ledger
+              and never with a wallet.
             </p>
 
             <div className="form-field">
@@ -475,7 +490,7 @@ export default function UserRegistrationPage() {
                   onChange={(e) => setPincode(e.target.value.replace(/\D/g, '').slice(0, 6))}
                 />
                 {caps && !caps.pincodeConfigured && (
-                  <span className="form-hint">Pincode verification (India Post) is not configured — this server cannot accept pincodes yet.</span>
+                  <span className="form-hint">Pincode verification is temporarily unavailable.</span>
                 )}
               </div>
               <div className="form-field">
@@ -506,7 +521,7 @@ export default function UserRegistrationPage() {
                   onChange={(e) => setMobile(e.target.value.replace(/\D/g, '').slice(0, 10))}
                 />
               </div>
-              <span className="form-hint">Used for real SMS and WhatsApp OTP at login. Stored encrypted; shown only masked.</span>
+              <span className="form-hint">Used to send one-time login codes. Stored encrypted; shown only masked.</span>
             </div>
 
             <div className="account-card-actions">
@@ -519,17 +534,19 @@ export default function UserRegistrationPage() {
 
         {step === 'aadhaar-document' && (
           <section className="account-section">
-            <h2 className="account-section-title">Aadhaar Document (real OCR)</h2>
+            <div className="account-stage-eyebrow">
+              Step {REGISTRATION_STAGE_ORDER.indexOf('identity') + 1} of {REGISTRATION_STAGE_ORDER.length} — {REGISTRATION_STAGE_LABELS.identity}
+            </div>
+            <h2 className="account-section-title">Verify your identity document</h2>
             <p className="account-section-desc">
-              Upload a clear photo of your Aadhaar or e-Aadhaar PDF. The server
-              runs a REAL OCR provider, cross-checks the extracted name against
-              what you entered, and stores only an encrypted extraction. The raw
-              file and file name are never retained.
+              Upload a clear photo or PDF of a government-issued identity
+              document (for example your Aadhaar or e-Aadhaar). The server
+              verifies that the document details match what you entered, and
+              stores only the encrypted result — the raw file is never kept.
             </p>
             {caps && !caps.aadhaarOcrConfigured && (
               <div className="status-msg error" role="alert">
-                Aadhaar document OCR is not configured on the verification server.
-                This step cannot complete — no fake extraction is used.
+                Identity verification is temporarily unavailable. Please try again later.
               </div>
             )}
             <div className="form-field">
@@ -540,23 +557,25 @@ export default function UserRegistrationPage() {
                 disabled={stepBusy || Boolean(caps && !caps.aadhaarOcrConfigured)}
                 onChange={(e) => void handleAadhaarDoc(e.target.files?.[0] ?? null)}
               />
-              {stepBusy && <span className="form-hint">Uploading and running OCR…</span>}
+              {stepBusy && <span className="form-hint">Uploading and verifying your document…</span>}
             </div>
           </section>
         )}
 
         {step === 'email' && (
           <section className="account-section">
-            <h2 className="account-section-title">Email Verification</h2>
+            <div className="account-stage-eyebrow">
+              Step {REGISTRATION_STAGE_ORDER.indexOf('identity') + 1} of {REGISTRATION_STAGE_ORDER.length} — {REGISTRATION_STAGE_LABELS.identity}
+            </div>
+            <h2 className="account-section-title">Confirm your email address</h2>
             <p className="account-section-desc">
-              A real code is emailed from the verification server. Disposable
-              email domains are rejected server-side, and the address is stored
-              only inside the encrypted profile.
+              A one-time code is sent to your inbox so we can confirm this
+              address belongs to you. The address is stored only inside your
+              encrypted profile.
             </p>
             {caps && !caps.emailConfigured && (
               <div className="status-msg error" role="alert">
-                Email delivery is not configured on the verification server. This
-                step cannot complete.
+                Email confirmation is temporarily unavailable. Please try again later.
               </div>
             )}
             {!emailSent ? (
@@ -581,7 +600,7 @@ export default function UserRegistrationPage() {
             ) : (
               <div className="form-row">
                 <div className="form-field">
-                  <label className="form-label" htmlFor="reg-email-code">Email code</label>
+                  <label className="form-label" htmlFor="reg-email-code">One-time code</label>
                   <input
                     id="reg-email-code"
                     type="text"
@@ -606,27 +625,30 @@ export default function UserRegistrationPage() {
 
         {step === 'sms-otp' && (
           <section className="account-section">
-            <h2 className="account-section-title">SMS OTP</h2>
+            <div className="account-stage-eyebrow">
+              Step {REGISTRATION_STAGE_ORDER.indexOf('identity') + 1} of {REGISTRATION_STAGE_ORDER.length} — {REGISTRATION_STAGE_LABELS.identity}
+            </div>
+            <h2 className="account-section-title">Confirm your mobile number</h2>
             <p className="account-section-desc">
-              A real one-time code is delivered by SMS to your registered Indian
-              mobile through the server's SMS gateway.
+              A one-time code is sent to your mobile number so we can confirm it
+              belongs to you. Your number is stored encrypted and shown only
+              masked.
             </p>
             {caps && !caps.smsConfigured && (
               <div className="status-msg error" role="alert">
-                SMS delivery is not configured on the verification server. This
-                step cannot complete — a fake code is never accepted.
+                Mobile confirmation is temporarily unavailable. Please try again later.
               </div>
             )}
             {!smsSent ? (
               <div className="account-card-actions">
                 <button className="btn btn-primary" onClick={() => void handleSendSms()} disabled={stepBusy || Boolean(caps && !caps.smsConfigured)}>
-                  {stepBusy ? 'Sending…' : 'Send SMS code'}
+                  {stepBusy ? 'Sending…' : 'Send code'}
                 </button>
               </div>
             ) : (
               <div className="form-row">
                 <div className="form-field">
-                  <label className="form-label" htmlFor="reg-sms-code">SMS code</label>
+                  <label className="form-label" htmlFor="reg-sms-code">One-time code</label>
                   <input
                     id="reg-sms-code"
                     type="text"
@@ -640,7 +662,7 @@ export default function UserRegistrationPage() {
                 </div>
                 <div className="account-card-actions">
                   <button className="btn btn-primary" onClick={() => void handleVerifySms()} disabled={stepBusy || smsCode.length !== 6}>
-                    {stepBusy ? 'Verifying…' : 'Verify SMS code'}
+                    {stepBusy ? 'Verifying…' : 'Verify code'}
                   </button>
                 </div>
               </div>
@@ -651,27 +673,29 @@ export default function UserRegistrationPage() {
 
         {step === 'whatsapp-otp' && (
           <section className="account-section">
-            <h2 className="account-section-title">WhatsApp OTP</h2>
+            <div className="account-stage-eyebrow">
+              Step {REGISTRATION_STAGE_ORDER.indexOf('identity') + 1} of {REGISTRATION_STAGE_ORDER.length} — {REGISTRATION_STAGE_LABELS.identity}
+            </div>
+            <h2 className="account-section-title">Confirm on WhatsApp</h2>
             <p className="account-section-desc">
-              An independent one-time code is delivered over WhatsApp — a separate,
-              real channel from SMS.
+              A separate one-time code is sent over WhatsApp as an independent
+              security check that your number is really yours.
             </p>
             {caps && !caps.whatsappConfigured && (
               <div className="status-msg error" role="alert">
-                WhatsApp delivery is not configured on the verification server.
-                This step cannot complete — a fake code is never accepted.
+                Confirmation by WhatsApp is temporarily unavailable. Please try again later.
               </div>
             )}
             {!waSent ? (
               <div className="account-card-actions">
                 <button className="btn btn-primary" onClick={() => void handleSendWhatsapp()} disabled={stepBusy || Boolean(caps && !caps.whatsappConfigured)}>
-                  {stepBusy ? 'Sending…' : 'Send WhatsApp code'}
+                  {stepBusy ? 'Sending…' : 'Send code'}
                 </button>
               </div>
             ) : (
               <div className="form-row">
                 <div className="form-field">
-                  <label className="form-label" htmlFor="reg-wa-code">WhatsApp code</label>
+                  <label className="form-label" htmlFor="reg-wa-code">One-time code</label>
                   <input
                     id="reg-wa-code"
                     type="text"
@@ -685,7 +709,7 @@ export default function UserRegistrationPage() {
                 </div>
                 <div className="account-card-actions">
                   <button className="btn btn-primary" onClick={() => void handleVerifyWhatsapp()} disabled={stepBusy || waCode.length !== 6}>
-                    {stepBusy ? 'Verifying…' : 'Verify WhatsApp code'}
+                    {stepBusy ? 'Verifying…' : 'Verify code'}
                   </button>
                 </div>
               </div>
@@ -695,27 +719,30 @@ export default function UserRegistrationPage() {
 
         {step === 'aadhaar-mobile' && (
           <section className="account-section">
-            <h2 className="account-section-title">Aadhaar-linked Mobile</h2>
+            <div className="account-stage-eyebrow">
+              Step {REGISTRATION_STAGE_ORDER.indexOf('identity') + 1} of {REGISTRATION_STAGE_ORDER.length} — {REGISTRATION_STAGE_LABELS.identity}
+            </div>
+            <h2 className="account-section-title">Confirm your Aadhaar-linked number</h2>
             <p className="account-section-desc">
-              The server asks its authorized KYC provider whether your registered
-              mobile is linked to an Aadhaar record — it is not inferred client-side.
+              The server checks with its authorised provider that your registered
+              mobile number is linked to an Aadhaar record — this is never
+              inferred on your device.
             </p>
             {caps && !caps.aadhaarMobileConfigured && (
               <div className="status-msg error" role="alert">
-                The Aadhaar-link provider is not configured on the verification
-                server. This step cannot complete.
+                This check is temporarily unavailable. Please try again later.
               </div>
             )}
             {!amChallenge ? (
               <div className="account-card-actions">
                 <button className="btn btn-primary" onClick={() => void handleStartAadhaarMobile()} disabled={stepBusy || Boolean(caps && !caps.aadhaarMobileConfigured)}>
-                  {stepBusy ? 'Checking…' : 'Verify Aadhaar-linked mobile'}
+                  {stepBusy ? 'Checking…' : 'Verify my number'}
                 </button>
               </div>
             ) : (
               <div className="form-row">
                 <div className="form-field">
-                  <label className="form-label" htmlFor="reg-am-code">Provider OTP code</label>
+                  <label className="form-label" htmlFor="reg-am-code">One-time code</label>
                   <input
                     id="reg-am-code"
                     type="text"
@@ -739,10 +766,13 @@ export default function UserRegistrationPage() {
 
         {step === 'password' && (
           <section className="account-section">
-            <h2 className="account-section-title">Password</h2>
+            <div className="account-stage-eyebrow">
+              Step {REGISTRATION_STAGE_ORDER.indexOf('security') + 1} of {REGISTRATION_STAGE_ORDER.length} — {REGISTRATION_STAGE_LABELS.security}
+            </div>
+            <h2 className="account-section-title">Set a secure password</h2>
             <p className="account-section-desc">
-              Stored only as a salted scrypt hash on the verification server — never
-              plaintext, never on-chain, never in this browser.
+              Your password is stored only as a salted cryptographic hash — never
+              in plaintext, never on a ledger, and never in this browser.
             </p>
             <div className="form-row">
               <div className="form-field">
@@ -778,11 +808,14 @@ export default function UserRegistrationPage() {
 
         {step === 'photo' && (
           <section className="account-section">
-            <h2 className="account-section-title">Passport Photo</h2>
+            <div className="account-stage-eyebrow">
+              Step {REGISTRATION_STAGE_ORDER.indexOf('security') + 1} of {REGISTRATION_STAGE_ORDER.length} — {REGISTRATION_STAGE_LABELS.security}
+            </div>
+            <h2 className="account-section-title">Add your photo</h2>
             <p className="account-section-desc">
-              Upload a near-square PNG with a uniform white background. The server
-              validates it pixel-by-pixel (white corners, subject occupancy) and
-              stores only a content hash — the portrait bytes are never kept.
+              Upload a passport-style photo with a plain white background. The
+              server validates it itself, and stores only a content reference —
+              the photo bytes are never kept.
             </p>
             <div className="form-field">
               <input
@@ -799,7 +832,14 @@ export default function UserRegistrationPage() {
 
         {step === 'liveness' && (
           <section className="account-section">
-            <h2 className="account-section-title">Live Liveness</h2>
+            <div className="account-stage-eyebrow">
+              Step {REGISTRATION_STAGE_ORDER.indexOf('liveness') + 1} of {REGISTRATION_STAGE_ORDER.length} — {REGISTRATION_STAGE_LABELS.liveness}
+            </div>
+            <h2 className="account-section-title">Complete a live check</h2>
+            <p className="account-section-desc">
+              A short on-camera check with simple prompts confirms a real person
+              is registering — it is verified server-side and never faked.
+            </p>
             <ServerRegistrationLiveness
               onStart={livenessStart}
               onEvidence={livenessEvidence}
@@ -815,12 +855,14 @@ export default function UserRegistrationPage() {
 
         {step === 'location' && (
           <section className="account-section">
-            <h2 className="account-section-title">Live Location</h2>
+            <div className="account-stage-eyebrow">
+              Step {REGISTRATION_STAGE_ORDER.indexOf('liveness') + 1} of {REGISTRATION_STAGE_ORDER.length} — {REGISTRATION_STAGE_LABELS.liveness}
+            </div>
+            <h2 className="account-section-title">Verify your location</h2>
             <p className="account-section-desc">
-              Your location is requested only AFTER the server has recorded your
-              real liveness. A fresh, accurate fix is submitted; the server
-              reverse-geocodes it and refuses stale, coarse, or out-of-India
-              evidence. Raw coordinates are never stored.
+              This runs only after your live check is recorded. A fresh, accurate
+              location fix confirms you are where you say you are; the server
+              validates it and never stores raw coordinates.
             </p>
             {locationState === 'idle' && (
               <div className="account-card-actions">
@@ -854,10 +896,13 @@ export default function UserRegistrationPage() {
 
         {step === 'finalize' && (
           <section className="account-section">
-            <h2 className="account-section-title">Finish</h2>
+            <div className="account-stage-eyebrow">
+              Step {REGISTRATION_STAGE_ORDER.indexOf('finalize') + 1} of {REGISTRATION_STAGE_ORDER.length} — {REGISTRATION_STAGE_LABELS.finalize}
+            </div>
+            <h2 className="account-section-title">Finish registration</h2>
             <p className="account-section-desc">
-              Every real verification gate has passed on the server. Finish account
-              creation to finalize your encrypted account record.
+              All verification checks have passed. Finish to create your secure
+              encrypted account record.
             </p>
             <div className="account-card-actions">
               <button className="btn btn-primary btn-lg" onClick={() => void handleFinalize()} disabled={stepBusy}>
@@ -899,8 +944,9 @@ export default function UserRegistrationPage() {
         mobile: mobile.replace(/\D/g, ''),
       });
       if (r.ok) {
+        // `postPersonal` already returns the authoritative new status — no
+        // duplicate GET is needed here.
         setStatus(r.data);
-        await refreshStatus();
       } else {
         setStepError(failureMessage(r));
       }
@@ -1130,14 +1176,19 @@ export default function UserRegistrationPage() {
   }
 }
 
-// ── Presentational stepper rail ────────────────────────────────────
+// ── Presentational stage rail ──────────────────────────────────────
+//
+// The citizen sees only the five user-facing stages — NOT the internal
+// provider/method checklist (OCR, SMS/WhatsApp OTP, liveness, etc.). The
+// active stage is derived from the server-authoritative step; the full
+// verification pipeline still runs underneath, exactly as before.
 
-function StepRail({ step }: { step: RegistrationStep }) {
-  const idx = REGISTRATION_STEP_ORDER.indexOf(step);
+function StageRail({ stage }: { stage: RegistrationStage }) {
+  const idx = REGISTRATION_STAGE_ORDER.indexOf(stage);
   return (
-    <div className="registration-stepper" aria-label="Registration progress">
+    <div className="registration-stepper registration-stage-rail" aria-label="Registration progress">
       <div className="registration-steps">
-        {REGISTRATION_STEP_ORDER.map((s, i) => {
+        {REGISTRATION_STAGE_ORDER.map((s, i) => {
           const state = i < idx ? 'done' : i === idx ? 'active' : 'pending';
           const cls = `registration-step ${state}`;
           return (
@@ -1152,9 +1203,11 @@ function StepRail({ step }: { step: RegistrationStep }) {
                   {state === 'active' && <div className="registration-step-pulse" />}
                   {state === 'pending' && <span className="registration-step-num">{i + 1}</span>}
                 </div>
-                {i < REGISTRATION_STEP_ORDER.length - 1 && <div className="registration-step-line" />}
+                {i < REGISTRATION_STAGE_ORDER.length - 1 && <div className="registration-step-line" />}
               </div>
-              <span className="registration-step-label">{REGISTRATION_STEP_LABELS[s]}</span>
+              <span className="registration-step-label registration-stage-label">
+                {REGISTRATION_STAGE_LABELS[s]}
+              </span>
             </div>
           );
         })}
@@ -1170,7 +1223,7 @@ function failureMessage(r: RegistrationApiResult<unknown>): string {
   if (r.issues && r.issues.length > 0) return r.issues.join(' ');
   switch (r.reason) {
     case 'unavailable':
-      return r.message ?? 'This step is unavailable because its real provider is not configured on the server.';
+      return r.message ?? 'This step is temporarily unavailable. Please try again later.';
     case 'mismatch':
     case 'provider-error':
     case 'bad-state':

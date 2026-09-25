@@ -17,9 +17,10 @@
  *   /models/<defaultModelName>-weights_manifest.json  and the weights .bin.
  */
 
-import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { copyIfNeeded, rel } from './incremental';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sourceDir = path.join(
@@ -46,6 +47,7 @@ if (!existsSync(sourceDir)) {
 mkdirSync(targetDir, { recursive: true });
 
 let copied = 0;
+let skipped = 0;
 for (const name of MODELS) {
   for (const suffix of ['-weights_manifest.json', '.bin']) {
     const file = `${name}${suffix}`;
@@ -56,11 +58,13 @@ for (const name of MODELS) {
       console.warn(`WARN: missing model file ${file}`);
       continue;
     }
-    copyFileSync(src, path.join(targetDir, file));
-    copied += 1;
+    const status = copyIfNeeded(src, path.join(targetDir, file));
+    if (status === 'copied') copied += 1;
+    else skipped += 1;
   }
 }
 
 console.log(
-  `Copied ${copied} face model file(s) into ${path.relative(projectRoot, targetDir)}.`,
+  `face models: ${copied} file(s) copied into ${rel(projectRoot, targetDir)}` +
+    ` (${skipped} unchanged, skipped).`,
 );

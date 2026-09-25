@@ -1,7 +1,8 @@
 import { useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import ProductBanner from '../components/ProductBanner';
-import { useWallet, describeError } from '../hooks/useWallet';
+import { useAuth } from '../auth/AuthContext';
+import { describeError } from '../hooks/useWallet';
 import ProofAnimation from '../ProofAnimation';
 import { type VerificationStep } from '../components/VerificationProgress';
 import { getApplicantSecretKey } from '../secret-keys';
@@ -25,7 +26,8 @@ interface RegistrationData {
 }
 
 export default function RegistrationReviewPage() {
-  const wallet = useWallet();
+  // Shared auth wallet instance — never a second detection/connect instance.
+  const { wallet } = useAuth();
   const [data] = useState<RegistrationData>(() => {
     const raw = sessionStorage.getItem('pendingRegistration');
     return raw ? JSON.parse(raw) : {

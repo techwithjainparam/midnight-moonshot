@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useWallet, describeError, type UseWalletReturn } from './useWallet';
+import { describeError, type UseWalletReturn } from './useWallet';
 import type { PriestateAPI } from '../priestate-api';
 import type { PriestateRegistration } from '../common-types';
 
@@ -19,17 +19,13 @@ export interface PriestateRegistrations {
  * — it is never fabricated. When no contract is reachable the caller sees
  * 'connecting' / 'failed' and must render its own honest empty/error state.
  *
- * Callers that already own a wallet (e.g. from `useAuth`) should pass it in
- * via `wallet` so the same manager/connection is reused rather than opening
- * a second one.
+ * The caller MUST pass the shared wallet from `useAuth()` so every ledger
+ * page reuses the same connection instead of opening a second one.
  */
 export function usePriestateRegistrations(
-  threshold = 1_000_000n,
-  wallet?: UseWalletReturn,
+  threshold: bigint = 1_000_000n,
+  wallet: UseWalletReturn,
 ): PriestateRegistrations {
-  const ownWallet = useWallet();
-  const activeWallet = wallet ?? ownWallet;
-
   const [connectState, setConnectState] = useState<'connecting' | 'connected' | 'failed'>('connecting');
   const [connectError, setConnectError] = useState<string | null>(null);
   const [api, setApi] = useState<PriestateAPI | null>(null);
@@ -38,7 +34,7 @@ export function usePriestateRegistrations(
   );
 
   useEffect(() => {
-    if (activeWallet.walletState !== 'connected') {
+    if (wallet.walletState !== 'connected') {
       setConnectState('connecting');
       return;
     }
@@ -46,7 +42,7 @@ export function usePriestateRegistrations(
     let depSub: { unsubscribe: () => void } | undefined;
     let stateSub: { unsubscribe: () => void } | undefined;
 
-    const deployment$ = activeWallet.manager.resolve(undefined, threshold);
+    const deployment$ = wallet.manager.resolve(undefined, threshold);
     depSub = deployment$.subscribe({
       next: (d) => {
         if (cancelled) return;
@@ -75,7 +71,7 @@ export function usePriestateRegistrations(
       depSub?.unsubscribe();
       stateSub?.unsubscribe();
     };
-  }, [activeWallet, activeWallet.walletState, threshold]);
+  }, [wallet, wallet.walletState, threshold]);
 
   return { connectState, connectError, api, registrations };
 }

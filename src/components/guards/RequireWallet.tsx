@@ -29,14 +29,29 @@ export function ConnectGate() {
           This area is protected. A connected Midnight wallet is required.
         </p>
         {wallet.walletState === 'no-wallet' || wallet.walletState === 'incompatible' ? (
-          <p className="auth-gate-note">No compatible Midnight wallet was detected in this browser.</p>
+          <>
+            <p className="auth-gate-note">
+              {wallet.walletState === 'incompatible'
+                ? 'A Midnight wallet was found, but its version is incompatible.'
+                : 'No compatible Midnight wallet was detected in this browser.'}
+            </p>
+            <div className="account-card-actions">
+              <button className="btn btn-ghost" onClick={wallet.redetect}>
+                Re-check for wallet
+              </button>
+            </div>
+          </>
         ) : (
           <button
             className="btn btn-primary btn-lg"
             onClick={wallet.connect}
             disabled={wallet.walletState !== 'ready'}
           >
-            {wallet.walletState === 'ready' ? 'Connect Wallet' : 'Detecting Wallet...'}
+            {wallet.walletState === 'ready'
+              ? 'Connect Wallet'
+              : wallet.walletState === 'connecting'
+                ? 'Connecting…'
+                : 'Detecting wallet…'}
           </button>
         )}
         {wallet.error && (

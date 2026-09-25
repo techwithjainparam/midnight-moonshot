@@ -6,7 +6,7 @@
   "author": "",
   "license": "MIT",
   "scripts": {
-    "compile": "compact compile contracts/priestate.compact contracts/managed/priestate",
+    "compile": "tsx scripts/compile-if-needed.ts",
     "copy-circuits": "tsx scripts/copy-circuit-files.ts",
     "copy-face-models": "tsx scripts/copy-face-models.ts",
     "copy-hand-models": "tsx scripts/copy-hand-models.ts",

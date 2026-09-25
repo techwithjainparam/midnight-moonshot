@@ -19,11 +19,11 @@
  * closed rather than fabricating gesture evidence.
  */
 
-import { copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
-import { createWriteStream } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Readable } from 'node:stream';
+import { copyIfNeeded, rel } from './incremental';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -48,17 +48,20 @@ mkdirSync(WASM_TARGET_DIR, { recursive: true });
 mkdirSync(MODEL_TARGET_DIR, { recursive: true });
 
 let wasmCopied = 0;
+let wasmSkipped = 0;
 for (const file of WASM_FILES) {
   const src = path.join(WASM_SOURCE_DIR, file);
   if (!existsSync(src)) {
     console.warn(`WARN: missing MediaPipe wasm file ${file}`);
     continue;
   }
-  copyFileSync(src, path.join(WASM_TARGET_DIR, file));
-  wasmCopied += 1;
+  const status = copyIfNeeded(src, path.join(WASM_TARGET_DIR, file));
+  if (status === 'copied') wasmCopied += 1;
+  else wasmSkipped += 1;
 }
 console.log(
-  `Copied ${wasmCopied} MediaPipe wasm file(s) into ${path.relative(projectRoot, WASM_TARGET_DIR)}.`,
+  `hand models: ${wasmCopied} MediaPipe wasm file(s) copied into ${rel(projectRoot, WASM_TARGET_DIR)}` +
+    ` (${wasmSkipped} unchanged, skipped).`,
 );
 
 if (existsSync(HAND_MODEL_FILE) && statSync(HAND_MODEL_FILE).size > 1_000_000) {

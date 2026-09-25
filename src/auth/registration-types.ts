@@ -82,6 +82,52 @@ export const REGISTRATION_STEP_LABELS: Record<RegistrationStep, string> = {
   finalize: 'Finish',
 };
 
+// ── User-facing stages ──────────────────────────────────────────────
+//
+// The internal 11-step pipeline above is NOT shown to the citizen as a
+// technical checklist. The UI presents five clean stages and maps each
+// internal step into the stage it belongs to; the server-authoritative step
+// still decides exactly which sub-task is rendered, it just lives inside a
+// user-facing stage. All real verification is preserved — nothing is skipped
+// or faked — only the labels change.
+
+export type RegistrationStage = 'personal' | 'identity' | 'security' | 'liveness' | 'finalize';
+
+export const REGISTRATION_STAGE_ORDER: readonly RegistrationStage[] = [
+  'personal',
+  'identity',
+  'security',
+  'liveness',
+  'finalize',
+];
+
+export const REGISTRATION_STAGE_LABELS: Record<RegistrationStage, string> = {
+  personal: 'Personal Details',
+  identity: 'Identity Verification',
+  security: 'Security Verification',
+  liveness: 'Liveness / Verification',
+  finalize: 'Complete Registration',
+};
+
+/** Which user-facing stage owns each internal verification step. */
+export const REGISTRATION_STEP_TO_STAGE: Record<RegistrationStep, RegistrationStage> = {
+  personal: 'personal',
+  'aadhaar-document': 'identity',
+  email: 'identity',
+  'sms-otp': 'identity',
+  'whatsapp-otp': 'identity',
+  'aadhaar-mobile': 'identity',
+  password: 'security',
+  photo: 'security',
+  liveness: 'liveness',
+  location: 'liveness',
+  finalize: 'finalize',
+};
+
+export function stageOfStep(step: RegistrationStep): RegistrationStage {
+  return REGISTRATION_STEP_TO_STAGE[step];
+}
+
 /** Derive the current required step from a server status (server order). */
 export function currentRegistrationStep(status: RegistrationStatus | null): RegistrationStep {
   if (!status || !status.personalVerified) return 'personal';

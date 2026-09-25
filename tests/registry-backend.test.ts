@@ -49,6 +49,7 @@ function makeConfig(over: { officerToken?: string } = {}): ServerConfig {
       apiToken: '',
       baseUrl: '',
       mobileLinkPath: '/api/v1/mobile-to-aadhaar/',
+      authScheme: 'token',
       timeoutMs: 1_000,
     },
     registry: {

@@ -6,12 +6,14 @@ import { saveOnChainEligibility } from '../data/on-chain-result';
 import ProductBanner from '../components/ProductBanner';
 import VerificationProgress, { type VerificationStep } from '../components/VerificationProgress';
 import ProofAnimation from '../ProofAnimation';
-import { useWallet, NETWORK_ID, describeError } from '../hooks/useWallet';
+import { useAuth } from '../auth/AuthContext';
+import { NETWORK_ID, describeError } from '../hooks/useWallet';
 
 export default function VerifyPage() {
   const { id } = useParams<{ id: string }>();
   const property = id ? getPropertyById(id) : undefined;
-  const wallet = useWallet();
+  // Shared auth wallet instance — never a second detection/connect instance.
+  const { wallet } = useAuth();
 
   const [verStep, setVerStep] = useState<VerificationStep>('wallet-required');
   const [proofError, setProofError] = useState<string | null>(null);

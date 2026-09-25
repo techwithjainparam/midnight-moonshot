@@ -66,7 +66,7 @@ function makeServerConfig(over: MakeConfigOverrides = {}): ServerConfig {
       maxSendsPerEmailPerHour: 5,
       maxSendsPerIpPerHour: 20,
     },
-    aadhaarKyc: { providerName: '', apiToken: '', baseUrl: '', mobileLinkPath: '', timeoutMs: 2000 },
+    aadhaarKyc: { providerName: '', apiToken: '', baseUrl: '', mobileLinkPath: '', authScheme: 'token', timeoutMs: 2000 },
     registry: { officerToken: '' },
     account: over.account ? { ...makeAccount(), ...over.account } : makeAccount(),
     ...(over.trustProxy !== undefined ? { trustProxy: over.trustProxy } : {}),

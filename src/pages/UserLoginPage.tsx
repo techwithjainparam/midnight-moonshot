@@ -125,17 +125,19 @@ export default function UserLoginPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [address, navigate]);
 
-  /** Re-fetch login state after a factor completes; advance phase as allowed. */
-  const refreshLogin = useCallback(async (): Promise<boolean> => {
-    if (!address) return false;
+  /** Re-fetch login state after a factor completes; return the fresh snapshot. */
+  const refreshLogin = useCallback(async (): Promise<LoginSnapshot | null> => {
+    if (!address) return null;
     const r = await fetchLoginState(address);
     if (!r.ok) {
       setFactorError('Could not re-check your login state.');
-      return false;
+      return null;
     }
     setExists(r.data.exists);
-    setLogin(r.data.login);
-    return r.data.exists === true;
+    const snap = r.data.login;
+    setLogin(snap);
+    // Only return a snapshot when the account still exists for this wallet.
+    return r.data.exists ? snap : null;
   }, [address]);
 
   const advancePhase = useCallback((snap: LoginSnapshot | null) => {
@@ -182,15 +184,18 @@ export default function UserLoginPage() {
       const r = await verifySmsOtp(address, smsCode);
       if (r.ok) {
         setSmsSentAt(null);
-        await refreshLogin();
-        advancePhase(login);
+        // Advance using the FRESH server snapshot — never the stale `login`
+        // captured before the re-fetch settled (a stale snapshot could leave
+        // the stepper stuck on a factor that actually completed).
+        const snap = await refreshLogin();
+        if (snap !== null) advancePhase(snap);
       } else {
         setFactorError(`SMS OTP: ${otpMsg(r.reason, r.message)}`);
       }
     } finally {
       setBusyFactor(null);
     }
-  }, [address, smsCode, refreshLogin, login, advancePhase]);
+  }, [address, smsCode, refreshLogin, advancePhase]);
 
   const handleSendWhatsapp = useCallback(async () => {
     if (!address) return;
@@ -209,15 +214,16 @@ export default function UserLoginPage() {
       const r = await verifyWhatsappOtp(address, whatsappCode);
       if (r.ok) {
         setWhatsappSentAt(null);
-        await refreshLogin();
-        advancePhase(login);
+        // Advance using the FRESH server snapshot (see SMS handler).
+        const snap = await refreshLogin();
+        if (snap !== null) advancePhase(snap);
       } else {
         setFactorError(`WhatsApp OTP: ${otpMsg(r.reason, r.message)}`);
       }
     } finally {
       setBusyFactor(null);
     }
-  }, [address, whatsappCode, refreshLogin, login, advancePhase]);
+  }, [address, whatsappCode, refreshLogin, advancePhase]);
 
   // Google factor (real OAuth popup flow, J.4). Linking is server-authoritative:
   // the account is marked verified only after a server-side verified redirect.

@@ -51,7 +51,7 @@ function makeServerConfig(): ServerConfig {
       maxSendsPerEmailPerHour: 5,
       maxSendsPerIpPerHour: 20,
     },
-    aadhaarKyc: { providerName: '', apiToken: '', baseUrl: '', mobileLinkPath: '', timeoutMs: 2000 },
+    aadhaarKyc: { providerName: '', apiToken: '', baseUrl: '', mobileLinkPath: '', authScheme: 'token', timeoutMs: 2000 },
     registry: { officerToken: '' },
     account: {
       encryptionSecret: ENC,

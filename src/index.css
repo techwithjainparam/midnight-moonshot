@@ -4209,6 +4209,15 @@ select.form-input {
   max-width: 560px;
 }
 
+.account-stage-eyebrow {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-accent, #7c6cff);
+  margin: 0 0 0.5rem;
+}
+
 .account-card-actions {
   display: flex;
   align-items: center;

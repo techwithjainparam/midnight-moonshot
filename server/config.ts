@@ -43,6 +43,11 @@ export interface ServerConfig {
     readonly baseUrl: string;
     /** Endpoint path for mobile→Aadhaar link verification at the provider. */
     readonly mobileLinkPath: string;
+    /** Optional OTP-challenge endpoints (vendor sends an OTP to the registered mobile). */
+    readonly challengePath?: string;
+    readonly submitPath?: string;
+    /** Authorization scheme used for the KYC vendor API. */
+    readonly authScheme: 'token' | 'bearer';
     readonly timeoutMs: number;
   };
   readonly registry: {
@@ -135,6 +140,8 @@ export interface ServerConfig {
     readonly pincode: {
       readonly baseUrl?: string;
       readonly timeoutMs?: number;
+      readonly maxRetries?: number;
+      readonly retryBaseDelayMs?: number;
     };
     /** Reverse geocoding (defaults to nominatim.openstreetmap.org). */
     readonly geocoding: {
@@ -279,6 +286,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       baseUrl: env.AADHAAR_KYC_BASE_URL?.trim() ?? '',
       mobileLinkPath:
         env.AADHAAR_KYC_MOBILE_LINK_PATH?.trim() ?? '/api/v1/mobile-to-aadhaar/',
+      challengePath: env.AADHAAR_KYC_CHALLENGE_PATH?.trim() || undefined,
+      submitPath: env.AADHAAR_KYC_SUBMIT_PATH?.trim() || undefined,
+      authScheme:
+        env.AADHAAR_KYC_AUTH_SCHEME?.trim().toLowerCase() === 'bearer' ? 'bearer' : 'token',
       timeoutMs: intEnv('AADHAAR_KYC_TIMEOUT_MS', 20000, env),
     },
     registry: {
@@ -298,6 +309,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       pincode: {
         baseUrl: env.PINCODE_BASE_URL?.trim() || undefined,
         timeoutMs: intEnv('PINCODE_TIMEOUT_MS', 8000, env),
+        maxRetries: intEnv('PINCODE_MAX_RETRIES', 2, env),
+        retryBaseDelayMs: intEnv('PINCODE_RETRY_BASE_DELAY_MS', 350, env),
       },
       geocoding: {
         baseUrl: env.GEOCODING_BASE_URL?.trim() || undefined,

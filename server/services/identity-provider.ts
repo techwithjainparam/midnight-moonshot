@@ -54,6 +54,9 @@ export function kycProviderFromConfig(cfg: {
   baseUrl: string;
   mobileLinkPath: string;
   timeoutMs: number;
+  challengePath?: string;
+  submitPath?: string;
+  authScheme?: 'token' | 'bearer';
 }): HttpAadhaarKycProvider | null {
   const hasDirectLink = Boolean(cfg.apiToken && cfg.baseUrl);
   if (!hasDirectLink) return null;
@@ -62,7 +65,9 @@ export function kycProviderFromConfig(cfg: {
     apiToken: cfg.apiToken,
     baseUrl: cfg.baseUrl.replace(/\/+$/, ''),
     mobileLinkPath: cfg.mobileLinkPath,
-    authScheme: 'token',
+    challengePath: cfg.challengePath,
+    submitPath: cfg.submitPath,
+    authScheme: cfg.authScheme ?? 'token',
     timeoutMs: cfg.timeoutMs,
   });
 }

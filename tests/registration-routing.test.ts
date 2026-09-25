@@ -61,6 +61,7 @@ function makeServerConfig(): ServerConfig {
       apiToken: '',
       baseUrl: '',
       mobileLinkPath: '/api/v1/mobile-to-aadhaar/',
+      authScheme: 'token',
       timeoutMs: 2_000,
     },
     registry: {

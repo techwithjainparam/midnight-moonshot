@@ -228,6 +228,9 @@ export function createVerificationServer(
           apiToken: config.aadhaarKyc.apiToken,
           baseUrl: config.aadhaarKyc.baseUrl,
           mobileLinkPath: config.aadhaarKyc.mobileLinkPath,
+          challengePath: config.aadhaarKyc.challengePath,
+          submitPath: config.aadhaarKyc.submitPath,
+          authScheme: config.aadhaarKyc.authScheme,
           timeoutMs: config.aadhaarKyc.timeoutMs,
         });
 

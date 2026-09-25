@@ -3,9 +3,11 @@
 // Single source of truth for access control. Wraps the EXISTING wallet
 // integration (`useWallet`) — no duplicated wallet logic — and derives:
 //
-//   status      'loading'       wallet state not yet known / connection
-//                               in progress → render NO protected content
-//               'disconnected'  no connected wallet → public only
+//   status      'disconnected'  no connected wallet → public only (this also
+//                               covers the wallet being *detected* or
+//                               *connecting*: guards render a live connect
+//                               gate with detecting/connecting labels instead
+//                               of blanking the page)
 //               'connected'     wallet connected → role determined
 //
 //   role        USER | OFFICER (only meaningful when connected)
@@ -46,15 +48,17 @@ const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 function toAuthStatus(walletState: UseWalletReturn['walletState']): AuthStatus {
   switch (walletState) {
-    case 'detecting':
-    case 'connecting':
-      // Authorization state unknown or unconfirmed — never render
-      // protected content during this window.
-      return 'loading';
     case 'connected':
       return 'connected';
     default:
-      // 'ready' | 'no-wallet' | 'incompatible'
+      // 'detecting' | 'connecting' | 'ready' | 'no-wallet' | 'incompatible'
+      //
+      // 'detecting' and 'connecting' intentionally map to 'disconnected' (NOT
+      // 'loading'): the route guards render the connect gate with a live
+      // "Detecting wallet… / Connecting…" label while the state is in flux,
+      // instead of blanking the page while a wallet prompt is open. No
+      // protected content ever renders for these states — guards only let
+      // children through when `status === 'connected'`.
       return 'disconnected';
   }
 }

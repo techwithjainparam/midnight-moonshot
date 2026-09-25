@@ -13,7 +13,8 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import ProductBanner from '../components/ProductBanner';
-import { useWallet, describeError } from '../hooks/useWallet';
+import { useAuth } from '../auth/AuthContext';
+import { describeError } from '../hooks/useWallet';
 import { getOfficerSecretKey } from '../secret-keys';
 import {
   RegistrationStatus,
@@ -42,7 +43,9 @@ const recordsToArray = (m: ReadonlyMap<bigint, PriestateRegistration>): Array<[b
   Array.from(m.entries()).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 
 export default function OfficerPage() {
-  const wallet = useWallet();
+  // Shared auth wallet instance (RequireOfficer guarantees a connected one) —
+  // never a second detection/connect instance.
+  const { wallet } = useAuth();
 
   const [connectState, setConnectState] = useState<'connecting' | 'connected' | 'failed'>('connecting');
   const [connectError, setConnectError] = useState<string | null>(null);

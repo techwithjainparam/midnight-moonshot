@@ -264,10 +264,15 @@ export class RegistrationService {
 
     // REAL pincode validation: the server queries India Post; an unavailable
     // upstream or a non-Indian pincode FAILS CLOSED (never silently accepted).
+    // The provider retries transient upstream failures internally, so this
+    // branch only fires when the upstream is genuinely unreachable.
     if (pincode) {
       const lookup = await this.pincodeProvider.lookup(pincode);
       if (!lookup.ok) {
-        return { ok: false, reason: 'provider-error', message: 'Pincode verification is unavailable. Try again shortly.' };
+        console.warn(
+          `[priestate] registration personal: pincode ${pincode} could not be verified against India Post (provider=${this.pincodeProvider.name}, reason=${lookup.reason}) — failing closed.`,
+        );
+        return { ok: false, reason: 'provider-error', message: 'Pincode verification is temporarily unavailable. Please try again shortly.' };
       }
       if (!lookup.info.valid) {
         return { ok: false, reason: 'mismatch', message: 'That pincode could not be verified against India Post.' };
@@ -309,7 +314,7 @@ export class RegistrationService {
       return { ok: false, reason: 'bad-state', message: 'Complete personal details first.' };
     }
     if (!this.aadhaarOcr.configured) {
-      return { ok: false, reason: 'unavailable', message: 'Aadhaar document OCR is not configured.' };
+      return { ok: false, reason: 'unavailable', message: 'Identity document verification is temporarily unavailable. Please try again later.' };
     }
     const profile = this.decryptProfile(session);
     if (!profile) return { ok: false, reason: 'bad-state', message: 'Personal details could not be read.' };
@@ -317,7 +322,7 @@ export class RegistrationService {
     const ocr = await this.aadhaarOcr.ocr(input.fileName, input.data, input.mimeType);
     if (!ocr.ok) {
       if (ocr.reason === 'unconfigured') {
-        return { ok: false, reason: 'unavailable', message: 'Aadhaar document OCR is not configured.' };
+        return { ok: false, reason: 'unavailable', message: 'Identity document verification is temporarily unavailable. Please try again later.' };
       }
       return { ok: false, reason: 'provider-error', message: 'The document could not be read. Upload a clear photo of your Aadhaar.' };
     }
@@ -353,7 +358,7 @@ export class RegistrationService {
     if (disposable.blocked) {
       return { ok: false, reason: 'invalid-input', issues: ['Disposable email addresses are not accepted.'] };
     }
-    if (!this.mailer) return { ok: false, reason: 'unavailable', message: 'Email verification is not configured.' };
+    if (!this.mailer) return { ok: false, reason: 'unavailable', message: 'Email confirmation is temporarily unavailable. Please try again later.' };
 
     // Persist the address inside the encrypted profile (never in the clear).
     const profile = this.decryptProfile(session);
@@ -420,7 +425,7 @@ export class RegistrationService {
     if (!session.personalPiiCipherText || !session.maskedMobile) {
       return { ok: false, reason: 'bad-state', message: 'Complete personal details first.' };
     }
-    if (!this.smsProvider.configured) return { ok: false, reason: 'unavailable', message: 'SMS delivery is not configured.' };
+    if (!this.smsProvider.configured) return { ok: false, reason: 'unavailable', message: 'Mobile confirmation is temporarily unavailable. Please try again later.' };
     const profile = this.decryptProfile(session);
     if (!profile) return { ok: false, reason: 'bad-state', message: 'Complete personal details first.' };
 
@@ -452,7 +457,7 @@ export class RegistrationService {
     if (!session.personalPiiCipherText || !session.maskedMobile) {
       return { ok: false, reason: 'bad-state', message: 'Complete personal details first.' };
     }
-    if (!this.whatsAppProvider.configured) return { ok: false, reason: 'unavailable', message: 'WhatsApp delivery is not configured.' };
+    if (!this.whatsAppProvider.configured) return { ok: false, reason: 'unavailable', message: 'Confirmation by WhatsApp is temporarily unavailable. Please try again later.' };
     const profile = this.decryptProfile(session);
     if (!profile) return { ok: false, reason: 'bad-state', message: 'Complete personal details first.' };
 
@@ -489,7 +494,7 @@ export class RegistrationService {
     const session = this.mustLoad(token);
     if (session === null) return { ok: false, reason: 'not-found' };
     if (!session.personalPiiCipherText) return { ok: false, reason: 'bad-state', message: 'Complete personal details first.' };
-    if (!this.aadhaarProvider) return { ok: false, reason: 'unavailable', message: 'Aadhaar-link verification is not configured.' };
+    if (!this.aadhaarProvider) return { ok: false, reason: 'unavailable', message: 'This check is temporarily unavailable. Please try again later.' };
     const profile = this.decryptProfile(session);
     if (!profile) return { ok: false, reason: 'bad-state', message: 'Personal details could not be read.' };
     const result = await this.aadhaarProvider.startAadhaarMobileVerification(profile.mobileE164);
@@ -513,7 +518,7 @@ export class RegistrationService {
   ): Promise<RegistrationResult<{ aadhaarMobileLinked: boolean }>> {
     const session = this.mustLoad(token);
     if (session === null) return { ok: false, reason: 'not-found' };
-    if (!this.aadhaarProvider) return { ok: false, reason: 'unavailable', message: 'Aadhaar-link verification is not configured.' };
+    if (!this.aadhaarProvider) return { ok: false, reason: 'unavailable', message: 'This check is temporarily unavailable. Please try again later.' };
     const result = await this.aadhaarProvider.verifyAadhaarMobileVerification(input);
     if (!result.ok) {
       return { ok: false, reason: 'provider-error', message: result.message ?? 'The verification could not be completed. Try again.' };

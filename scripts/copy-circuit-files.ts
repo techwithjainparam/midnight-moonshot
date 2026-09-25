@@ -20,9 +20,10 @@
  * compiled `.bzkir` form) and is therefore not copied.
  */
 
-import { copyFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { copyIfNeeded, rel } from './incremental';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const managedDir = path.join(projectRoot, 'contracts', 'managed', 'priestate');
@@ -33,25 +34,34 @@ const zkirSource = path.join(managedDir, 'zkir');
 const keysTarget = path.join(publicDir, 'keys');
 const zkirTarget = path.join(publicDir, 'zkir');
 
-const copyMatching = (sourceDir: string, targetDir: string, extensions: readonly string[]): number => {
+const copyMatching = (
+  sourceDir: string,
+  targetDir: string,
+  extensions: readonly string[],
+): { copied: number; skipped: number } => {
   if (!existsSync(sourceDir)) {
     throw new Error(`Missing generated artifacts directory: ${sourceDir}. Run "npm run compile" first.`);
   }
   mkdirSync(targetDir, { recursive: true });
 
+  let copied = 0;
+  let skipped = 0;
   const files = readdirSync(sourceDir).filter((file) =>
     extensions.some((extension) => file.endsWith(extension)),
   );
   for (const file of files) {
-    copyFileSync(path.join(sourceDir, file), path.join(targetDir, file));
+    const status = copyIfNeeded(path.join(sourceDir, file), path.join(targetDir, file));
+    if (status === 'copied') copied += 1;
+    else skipped += 1;
   }
-  return files.length;
+  return { copied, skipped };
 };
 
 const keyFiles = copyMatching(keysSource, keysTarget, ['.prover', '.verifier']);
 const zkirFiles = copyMatching(zkirSource, zkirTarget, ['.bzkir']);
 
 console.log(
-  `Copied ${keyFiles} key file(s) into ${path.relative(projectRoot, keysTarget)} and ` +
-    `${zkirFiles} ZKIR file(s) into ${path.relative(projectRoot, zkirTarget)}.`,
+  `circuits: ${keyFiles.copied + zkirFiles.copied} file(s) copied into ` +
+    `${rel(projectRoot, keysTarget)} + ${rel(projectRoot, zkirTarget)}` +
+    ` (${keyFiles.skipped + zkirFiles.skipped} unchanged, skipped).`,
 );

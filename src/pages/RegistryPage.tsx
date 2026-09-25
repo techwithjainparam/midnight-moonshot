@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import ProductBanner from '../components/ProductBanner';
+import { useAuth } from '../auth/AuthContext';
 import { usePriestateRegistrations } from '../hooks/usePriestateRegistrations';
 import { publicRegistryItems, type RegistryItem } from '../registration-view';
 
@@ -13,7 +14,10 @@ import { publicRegistryItems, type RegistryItem } from '../registration-view';
 // fabricated from mock data.
 export default function RegistryPage() {
   const [search, setSearch] = useState('');
-  const { connectState, connectError, registrations } = usePriestateRegistrations();
+  // Reuse the shared auth wallet so no second detection/connect instance is
+  // created for this page.
+  const { wallet } = useAuth();
+  const { connectState, connectError, registrations } = usePriestateRegistrations(1_000_000n, wallet);
 
   const publicRecords: RegistryItem[] = useMemo(
     () => publicRegistryItems(registrations),

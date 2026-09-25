@@ -189,7 +189,7 @@ npm run build                # typecheck + production build
 
 ## Product Proposal
 
-[PRIVESTATE Product Proposal](docs/PRIVESTATE-PRODUCT-PROPOSAL.md) — product, why Midnight, data model, mainnet feasibility.
+[PRIVESTATE Product Proposal](PROPOSAL.md) (repository root) — product and users, why Midnight specifically, data model (`Data Point / Type / Disclosed To`), and mainnet feasibility.
 
 ## Smart Contract
 

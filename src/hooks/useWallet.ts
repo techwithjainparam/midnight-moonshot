@@ -84,6 +84,8 @@ export interface UseWalletReturn {
   connect: () => Promise<void>;
   disconnect: () => void;
   setError: (err: string | null) => void;
+  /** Re-run wallet presence detection after a transient 'no-wallet'/'incompatible' result. */
+  redetect: () => void;
 }
 
 export function useWallet(): UseWalletReturn {
@@ -94,6 +96,12 @@ export function useWallet(): UseWalletReturn {
   const [error, setError] = useState<string | null>(null);
   const [deployments, setDeployments] = useState<PriestateDeployment[]>([]);
   const managerRef = useRef<BrowserPriestateManager | null>(null);
+  // Guards against opening a second wallet-connect prompt while one is already
+  // awaiting approval (duplicate prompts on double-click / re-render races).
+  const connectingRef = useRef(false);
+  // Incremented to re-run the presence-detection poll (e.g. after the wallet
+  // was installed later so the UI was not stuck on 'no-wallet').
+  const [detectKey, setDetectKey] = useState(0);
 
   const getManager = useCallback(() => {
     if (!managerRef.current) {
@@ -139,10 +147,22 @@ export function useWallet(): UseWalletReturn {
       }
     }, 100);
     return () => clearInterval(t);
+  }, [detectKey]);
+
+  // Re-run presence detection (recovers from a transient 'no-wallet' /
+  // 'incompatible' result without a full reload).
+  const redetect = useCallback(() => {
+    setError(null);
+    setWalletState('detecting');
+    setDetectKey((k) => k + 1);
   }, []);
 
   const connect = useCallback(async () => {
     if (!walletAPI) return;
+    // Never open a second connect prompt while one is already in flight.
+    if (connectingRef.current) return;
+    if (walletState !== 'ready') return;
+    connectingRef.current = true;
     setWalletState('connecting');
     setError(null);
     try {
@@ -155,12 +175,15 @@ export function useWallet(): UseWalletReturn {
     } catch (e: unknown) {
       setError(describeError(e));
       setWalletState('ready');
+    } finally {
+      connectingRef.current = false;
     }
-  }, [walletAPI, getManager]);
+  }, [walletAPI, getManager, walletState]);
 
   const disconnect = useCallback(() => {
     const manager = managerRef.current;
     manager?.disconnect();
+    connectingRef.current = false;
     setWallet(null);
     setAddress(null);
     setWalletState('ready');
@@ -179,5 +202,6 @@ export function useWallet(): UseWalletReturn {
     connect,
     disconnect,
     setError,
+    redetect,
   };
 }
