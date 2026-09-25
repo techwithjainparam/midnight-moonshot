@@ -115,8 +115,14 @@ export default function UserRegistrationPage() {
 
   // ── Personal-form state ──────────────────────────────────────────
   const [fullName, setFullName] = useState('');
+  // Canonical Aadhaar value: RAW DIGITS ONLY, never a masked string. The
+  // mask is presentation-only and is driven by `aadhaarFocused`, so a focused
+  // field always shows the complete raw digits. That keeps `onChange` reading
+  // real input — previously the handler re-parsed the *masked* DOM value
+  // (`•••• 9012`), whose leading 8 digits were stripped by `.replace(/\D/g,'')`
+  // and silently lost, producing a short Aadhaar and a 400 invalid-input.
   const [aadhaarNumber, setAadhaarNumber] = useState('');
-  const [aadhaarMasked, setAadhaarMasked] = useState(false);
+  const [aadhaarFocused, setAadhaarFocused] = useState(false);
   const [addressOnAadhaar, setAddressOnAadhaar] = useState('');
   const [pincode, setPincode] = useState('');
   const [dateOfBirth, setDateOfBirth] = useState('');
@@ -458,9 +464,10 @@ export default function UserRegistrationPage() {
                 autoComplete="off"
                 className="form-input"
                 placeholder="•••• •••• 4321"
-                value={aadhaarMasked && aadhaarNumber.length === 12 ? maskAadhaar(aadhaarNumber) : aadhaarNumber}
-                onChange={(e) => { setAadhaarNumber(e.target.value.replace(/\D/g, '').slice(0, 12)); setAadhaarMasked(false); }}
-                onBlur={() => { if (aadhaarNumber.replace(/\s/g, '').length === 12) setAadhaarMasked(true); }}
+                value={aadhaarFocused || aadhaarNumber.length !== 12 ? aadhaarNumber : maskAadhaar(aadhaarNumber)}
+                onFocus={() => setAadhaarFocused(true)}
+                onChange={(e) => setAadhaarNumber(e.target.value.replace(/\D/g, '').slice(0, 12))}
+                onBlur={() => setAadhaarFocused(false)}
               />
               <span className="form-hint">Masked after entry; only a masked fragment is ever kept.</span>
             </div>
