@@ -48,6 +48,7 @@ export default function RegistrationReviewPage() {
 
   const [step, setStep] = useState<'review' | 'submitting' | 'submitted'>('review');
   const [proofStep, setProofStep] = useState<VerificationStep>('wallet-required');
+  const [proofError, setProofError] = useState<string | null>(null);
   const [onChainEligible, setOnChainEligible] = useState<boolean | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submittedId, setSubmittedId] = useState<bigint | null>(null);
@@ -74,6 +75,8 @@ export default function RegistrationReviewPage() {
 
   const handleProofFlow = useCallback(async () => {
     if (!wallet.wallet) return;
+    setProofError(null);
+    setOnChainEligible(null);
     setProofStep('preparing');
     try {
       const api = await resolveApi();
@@ -85,8 +88,9 @@ export default function RegistrationReviewPage() {
       const result = await api.checkEligibility(val);
       setOnChainEligible(result);
       setProofStep('verified');
-    } catch {
+    } catch (e: unknown) {
       setProofStep('error');
+      setProofError(describeError(e));
     }
   }, [wallet, data, resolveApi]);
 
@@ -299,7 +303,9 @@ export default function RegistrationReviewPage() {
             </div>
             {wallet.walletState === 'connected' ? (
               <button className="btn btn-ghost" onClick={handleProofFlow} disabled={proofStep !== 'wallet-required' && proofStep !== 'error'}>
-                {proofStep === 'wallet-required' ? 'Run ZK Verification' : 'Verification in Progress...'}
+                {proofStep === 'wallet-required' && 'Run ZK Verification'}
+                {proofStep === 'error' && 'Retry ZK Verification'}
+                {proofStep !== 'wallet-required' && proofStep !== 'error' && 'Verification in Progress...'}
               </button>
             ) : (
               <button className="btn btn-ghost" onClick={wallet.connect} disabled={wallet.walletState !== 'ready'}>
@@ -321,7 +327,7 @@ export default function RegistrationReviewPage() {
               }
             />
           )}
-          {proofStep === 'error' && <ProofAnimation status="error" />}
+          {proofStep === 'error' && <ProofAnimation status="error" message={proofError ?? undefined} />}
 
           {submitError && (
             <div className="status-msg error" role="alert" style={{ marginTop: '1rem' }}>

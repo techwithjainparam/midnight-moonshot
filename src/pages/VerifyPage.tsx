@@ -69,7 +69,10 @@ export default function VerifyPage() {
         // the contract's public ledger state. The private property value
         // never leaves the witness, and the displayed result is the one the
         // contract computed — not a local recomputation.
-        const onChainResult = await deployment.api.checkEligibility(property.propertyValue);
+        const onChainResult = await deployment.api.checkEligibility(
+          property.propertyValue,
+          () => setVerStep('submitting'),
+        );
         saveOnChainEligibility({
           propertyId: property.propertyId,
           result: onChainResult,
@@ -187,7 +190,7 @@ export default function VerifyPage() {
 
           {verStep === 'error' && (
             <div className="verify-proof-section">
-              <ProofAnimation status="error" />
+              <ProofAnimation status="error" message={proofError ?? undefined} />
             </div>
           )}
 
@@ -214,6 +217,14 @@ export default function VerifyPage() {
               <Link to={`/verification/${property.id}`} className="btn btn-primary btn-lg">
                 View Verification Result
               </Link>
+            </div>
+          )}
+
+          {verStep === 'error' && wallet.walletState === 'connected' && (
+            <div className="verify-actions">
+              <button className="btn btn-primary btn-lg" onClick={runVerification}>
+                Try Verification Again
+              </button>
             </div>
           )}
         </div>

@@ -1,4 +1,5 @@
-import { NavLink, Link } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { NavLink, Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import WalletStatus from './WalletStatus';
 
@@ -12,9 +13,17 @@ import WalletStatus from './WalletStatus';
 //                         navigation is not mixed into the officer role.
 export default function Navbar() {
   const { status, isOfficer, officerAuthorized, wallet } = useAuth();
+  const location = useLocation();
+  const [menuOpen, setMenuOpen] = useState(false);
   const showOfficerNav = status === 'connected' && isOfficer;
   const officerRoleLabel =
     (officerAuthorized ? 'OFFICER' : 'OFFICER · DEMO');
+
+  // A navigation click changes the route, so the mobile panel must close
+  // rather than stay open over the page the user just opened.
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [location.pathname, location.hash]);
 
   const linkClass = ({ isActive }: { isActive: boolean }) =>
     `navbar-link${isActive ? ' active' : ''}`;
@@ -26,7 +35,20 @@ export default function Navbar() {
           <span className="navbar-brand-text">PRIVESTATE</span>
         </Link>
 
-        <div className="navbar-links">
+        <button
+          type="button"
+          className="navbar-toggle"
+          aria-expanded={menuOpen}
+          aria-controls="navbar-menu"
+          aria-label={menuOpen ? 'Close navigation menu' : 'Open navigation menu'}
+          onClick={() => setMenuOpen((open) => !open)}
+        >
+          <span className="navbar-toggle-bar" aria-hidden="true" />
+          <span className="navbar-toggle-bar" aria-hidden="true" />
+          <span className="navbar-toggle-bar" aria-hidden="true" />
+        </button>
+
+        <div id="navbar-menu" className={`navbar-links${menuOpen ? ' open' : ''}`}>
           {status === 'connected' && !isOfficer && (
             <>
               <NavLink to="/register" className={linkClass}>

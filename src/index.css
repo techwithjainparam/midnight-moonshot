@@ -140,6 +140,37 @@ img { display: block; max-width: 100%; }
   gap: 4px;
 }
 
+.navbar-toggle {
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  width: 40px;
+  height: 40px;
+  padding: 0 9px;
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.navbar-toggle-bar {
+  display: block;
+  width: 100%;
+  height: 2px;
+  background: var(--color-text-secondary);
+  border-radius: 1px;
+}
+
+.navbar-toggle:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.navbar-toggle:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
 .navbar-link {
   font-size: 0.8rem;
   font-weight: 500;
@@ -885,6 +916,47 @@ input::placeholder {
   font-size: 0.75rem;
   color: var(--color-text-muted);
   font-style: italic;
+}
+
+.proof-failure {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  max-width: 460px;
+  text-align: center;
+  animation: fadeIn 0.5s ease-out;
+}
+
+.proof-failure-icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: rgba(248, 113, 113, 0.1);
+  border: 2px solid var(--color-error);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: var(--color-error);
+}
+
+.proof-failure-text {
+  font-size: 0.85rem;
+  color: var(--color-error);
+  font-weight: 500;
+}
+
+.proof-failure-sub {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  line-height: 1.5;
+}
+
+.proof-failure .status-msg {
+  margin-top: 0;
+  text-align: left;
 }
 
 /* ── Wallet Status ─────────────────────────────────────────────── */
@@ -2227,10 +2299,43 @@ input::placeholder {
 @media (max-width: 768px) {
   .navbar-inner {
     padding: 0 1rem;
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 56px;
+    row-gap: 0;
   }
 
+  .navbar-toggle {
+    display: flex;
+    order: 3;
+  }
+
+  /* Keep the wallet status and the toggle pinned to the right of the brand
+     row, with the link panel wrapping onto its own full-width row below. */
+  .navbar-wallet {
+    order: 2;
+    margin-left: auto;
+  }
+
+  /* The links become a dropdown panel below the brand row instead of
+     being hidden outright — every route stays reachable on mobile. */
   .navbar-links {
     display: none;
+    order: 4;
+    flex-basis: 100%;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+    padding: 0.5rem 0 0.75rem;
+  }
+
+  .navbar-links.open {
+    display: flex;
+  }
+
+  .navbar-links .navbar-link {
+    padding: 10px 12px;
+    font-size: 0.85rem;
   }
 
   .page {

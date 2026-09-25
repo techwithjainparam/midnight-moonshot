@@ -19,7 +19,9 @@ export default function DashboardPage() {
   const { walletState, deployments, connect } = wallet;
 
   // Public registry aggregates read from the REAL contract ledger state.
-  const { registrations } = usePriestateRegistrations(1_000_000n, wallet);
+  // connectState/connectError must be honoured: a failed connection is NOT an
+  // empty registry, and reporting it as "0 records" would misstate the chain.
+  const { connectState, connectError, registrations } = usePriestateRegistrations(1_000_000n, wallet);
   const counts = registrationCounts(registrations);
 
   // Own contact profile (FEATURE 1) — private to this wallet.
@@ -149,16 +151,38 @@ export default function DashboardPage() {
             <h2 className="dashboard-card-title">Public Registry</h2>
           </div>
           <div className="dashboard-card-body">
-            <div className="dash-stats">
-              <div className="dash-stat">
-                <span className="dash-stat-value">{publicCount}</span>
-                <span className="dash-stat-label">Finalized Public Records</span>
-              </div>
-            </div>
-            <p className="dash-empty-text">
-              Applications under review are private to their owners and are
-              only visible to authorized officers.
-            </p>
+            {connectState === 'failed' ? (
+              <>
+                <div className="status-msg error" role="alert">
+                  Could not read the PRIESTATE registry contract.{' '}
+                  {connectError ? `Reason: ${connectError}` : 'The contract state is unavailable.'}{' '}
+                  The record count below is unknown — this is a connection
+                  failure, not an empty registry.
+                </div>
+                <div className="dash-stats">
+                  <div className="dash-stat">
+                    <span className="dash-stat-value">—</span>
+                    <span className="dash-stat-label">Finalized Public Records</span>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="dash-stats">
+                  <div className="dash-stat">
+                    <span className="dash-stat-value">
+                      {connectState === 'connecting' ? '—' : publicCount}
+                    </span>
+                    <span className="dash-stat-label">Finalized Public Records</span>
+                  </div>
+                </div>
+                <p className="dash-empty-text">
+                  {connectState === 'connecting'
+                    ? 'Connecting to the contract to read the public ledger…'
+                    : 'Applications under review are private to their owners and are only visible to authorized officers.'}
+                </p>
+              </>
+            )}
           </div>
         </div>
 

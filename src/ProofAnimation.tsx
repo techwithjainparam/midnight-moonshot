@@ -1,5 +1,5 @@
 /**
- * ProofAnimation — Visual state for proof generation and success.
+ * ProofAnimation — Visual state for proof generation, success, and failure.
  */
 
 interface ProofAnimationProps {
@@ -33,6 +33,22 @@ export default function ProofAnimation({ status, message }: ProofAnimationProps)
             Proved without revealing your input
           </div>
           {message && <div className="status-msg success">{message}</div>}
+        </div>
+      </div>
+    );
+  }
+
+  if (status === 'error') {
+    return (
+      <div className="proof-container">
+        <div className="proof-failure" role="alert">
+          <div className="proof-failure-icon" aria-hidden="true">!</div>
+          <div className="proof-failure-text">Proof failed</div>
+          <div className="proof-failure-sub">
+            The zero-knowledge proof was not generated or submitted. No
+            eligibility result was recorded on the Midnight ledger.
+          </div>
+          {message && <div className="status-msg error">{message}</div>}
         </div>
       </div>
     );

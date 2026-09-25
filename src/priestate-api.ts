@@ -73,13 +73,19 @@ export class PriestateAPI {
    * Resolves with the ON-CHAIN `eligibilityResult` from the contract's
    * public ledger state once the transaction has finalized — never a
    * client-side recomputation.
+   *
+   * `onSubmitted` fires once the proof has been generated and the transaction
+   * has been submitted, before the result is read back from the ledger. It is
+   * purely a progress signal for the UI and is not awaited.
    */
-  async checkEligibility(propertyValue: bigint): Promise<boolean> {
+  async checkEligibility(propertyValue: bigint, onSubmitted?: () => void): Promise<boolean> {
     setPropertyValue(propertyValue);
     this.logger?.info({ deployedContractAddress: this.deployedContractAddress }, 'Checking eligibility for property value');
     return firstResultAfterTx(
       (this.deployedContract as any).callTx.checkEligibility(),
       this.state$,
+      ELIGIBILITY_RESULT_TIMEOUT_MS,
+      onSubmitted,
     );
   }
 
@@ -170,20 +176,26 @@ export const ELIGIBILITY_RESULT_TIMEOUT_MS = 60_000;
  * circuit outcome — not a value recomputed from the private input. The
  * private property value is never an argument here and never enters any
  * public state.
+ *
+ * `onSubmitted` is invoked as soon as the transaction promise settles, before
+ * the ledger read is awaited, so callers can surface the submit phase. It is
+ * optional and never affects the resolved value.
  */
 export function firstResultAfterTx(
   tx: Promise<unknown>,
   state$: Observable<PriestateDerivedState>,
   timeoutMs: number = ELIGIBILITY_RESULT_TIMEOUT_MS,
+  onSubmitted?: () => void,
 ): Promise<boolean> {
   return firstValueFrom(
     from(tx).pipe(
-      concatMap(() =>
-        state$.pipe(
+      concatMap(() => {
+        onSubmitted?.();
+        return state$.pipe(
           take(1),
           map((s) => s.eligibilityResult),
-        ),
-      ),
+        );
+      }),
       timeout({
         first: timeoutMs,
         with: () =>

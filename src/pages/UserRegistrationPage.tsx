@@ -553,7 +553,10 @@ export default function UserRegistrationPage() {
             </p>
             {caps && !caps.aadhaarOcrConfigured && (
               <div className="status-msg error" role="alert">
-                Identity verification is temporarily unavailable. Please try again later.
+                Identity verification is not configured in this environment, so
+                this step cannot be completed and no Aadhaar document can be
+                verified. This is a configuration issue rather than a temporary
+                error — retrying will not help until the provider is configured.
               </div>
             )}
             <div className="form-field">
