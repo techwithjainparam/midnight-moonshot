@@ -139,6 +139,11 @@ export interface VerificationServerOverrides {
    */
   readonly accountGoogleProvider?: GoogleProviderObject;
   /**
+   * Test seam: replace the reverse-geocoding adapter used to turn a citizen's
+   * coordinate into an editable address (a real Nominatim adapter otherwise).
+   */
+  readonly registrationGeocodingProvider?: GeocodingProvider;
+  /**
    * Test seam: replace the OIDC token verifier used for ID-token checks. When
    * absent the provider builds one from config (fail-closed if unconfigured).
    */
@@ -370,9 +375,9 @@ encryptionSecret: overrides.accountEncryptionSecret ?? config.account?.encryptio
   const registrationPincode: PincodeProvider = createPincodeProviderFromConfig(
     config.registration?.pincode ?? {},
   );
-  const registrationGeocoding: GeocodingProvider = new NominatimReverseGeocoder(
-    config.registration?.geocoding ?? {},
-  );
+  const registrationGeocoding: GeocodingProvider =
+    overrides.registrationGeocodingProvider ??
+    new NominatimReverseGeocoder(config.registration?.geocoding ?? {});
   const registrationDisposableEmail: DisposableEmailChecker =
     overrides.registrationDisposableEmailChecker ??
     createDisposableEmailChecker(config.registration?.disposableEmailExtraDomains ?? '');
@@ -866,6 +871,10 @@ encryptionSecret: overrides.accountEncryptionSecret ?? config.account?.encryptio
         return void (await routeRegistrationBegin(req, res));
       case '/api/v1/registration/personal':
         return void (await routeRegistrationPersonal(req, res, body));
+      case '/api/v1/registration/personal/complete':
+        return routeRegistrationPersonalComplete(req, res);
+      case '/api/v1/registration/personal/reverse-geocode':
+        return void (await routeRegistrationReverseGeocode(req, res, body));
       case '/api/v1/registration/email':
         return void (await routeRegistrationEmail(req, res, body));
       case '/api/v1/registration/email/verify':
@@ -1787,13 +1796,56 @@ encryptionSecret: overrides.accountEncryptionSecret ?? config.account?.encryptio
       return;
     }
     const result = await registrationService.personal(token, {
+      firstName: str(body, 'firstName'),
+      middleName: str(body, 'middleName'),
+      lastName: str(body, 'lastName'),
       fullName: str(body, 'fullName'),
       aadhaarNumber: str(body, 'aadhaarNumber'),
+      panNumber: str(body, 'panNumber'),
       addressOnAadhaar: str(body, 'addressOnAadhaar'),
+      city: str(body, 'city'),
+      state: str(body, 'state'),
       pincode: str(body, 'pincode'),
       dateOfBirth: str(body, 'dateOfBirth'),
+      mobileCountryCode: str(body, 'mobileCountryCode'),
       mobile: str(body, 'mobile'),
     });
+    sendRegistrationResult(res, result);
+  }
+
+  /** POST /api/v1/registration/personal/complete — phase-2 phone gate. */
+  function routeRegistrationPersonalComplete(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): void {
+    const token = parseRegistrationCookie(req);
+    if (!token) {
+      sendMissingRegistration(res);
+      return;
+    }
+    sendRegistrationResult(res, registrationService.completePersonal(token));
+  }
+
+  /**
+   * POST /api/v1/registration/personal/reverse-geocode
+   *
+   * Turns a browser coordinate into a starting address. The coordinates are
+   * read in this request, used only to call the geocoder, and dropped — they
+   * are never stored, echoed to the client, or written to any ledger.
+   */
+  async function routeRegistrationReverseGeocode(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    body: JsonBody,
+  ): Promise<void> {
+    const token = parseRegistrationCookie(req);
+    if (!token) {
+      sendMissingRegistration(res);
+      return;
+    }
+    const lat = typeof body.lat === 'number' ? body.lat : Number.NaN;
+    const lng = typeof body.lng === 'number' ? body.lng : Number.NaN;
+    const result = await registrationService.reverseGeocode(token, lat, lng);
     sendRegistrationResult(res, result);
   }
 

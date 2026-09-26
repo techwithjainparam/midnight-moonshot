@@ -27,6 +27,10 @@ export interface RegistrationStatus {
   readonly emailVerified: boolean;
   readonly smsOtpVerified: boolean;
   readonly whatsappOtpVerified: boolean;
+  /** Either channel satisfies phone verification (SMS OR WhatsApp). */
+  readonly phoneVerified: boolean;
+  /** Which channel actually proved the number, when one has. */
+  readonly phoneChannel: 'sms' | 'whatsapp' | null;
   readonly aadhaarMobileLinked: boolean;
   readonly passwordSet: boolean;
   readonly photoStatus: 'unverified' | 'verified';
@@ -133,8 +137,10 @@ export function currentRegistrationStep(status: RegistrationStatus | null): Regi
   if (!status || !status.personalVerified) return 'personal';
   if (status.aadhaarDocumentStatus !== 'verified') return 'aadhaar-document';
   if (!status.emailVerified) return 'email';
-  if (!status.smsOtpVerified) return 'sms-otp';
-  if (!status.whatsappOtpVerified) return 'whatsapp-otp';
+  // Phone is EITHER-or. The citizen picks SMS or WhatsApp, so once either
+  // channel is verified there is no second phone step to satisfy. (These two
+  // steps are now completed as part of the personal stage.)
+  if (!status.phoneVerified) return status.smsOtpVerified ? 'whatsapp-otp' : 'sms-otp';
   if (!status.aadhaarMobileLinked) return 'aadhaar-mobile';
   if (!status.passwordSet) return 'password';
   if (status.photoStatus !== 'verified') return 'photo';

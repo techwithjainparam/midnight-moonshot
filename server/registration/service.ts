@@ -37,7 +37,8 @@ import type { WhatsAppProvider } from '../account/whatsapp-provider.js';
 import { OtpService } from '../lib/otp-service.js';
 import type { Mailer } from '../lib/mailer.js';
 import { otpEmailHtml, otpEmailText } from '../lib/mailer.js';
-import { normalizeEmail, normalizeIndianMobile } from '../lib/validation.js';
+import { normalizeEmail, normalizePan, buildE164, isValidNamePart, isValidIndianPincode, normalizeCountryCode, isIndianState } from '../lib/validation.js';
+import { isSupportedCallingCode } from '../lib/dialling-plans.js';
 import type { IdentityVerificationProvider } from '../services/identity-provider-types.js';
 import type { AadhaarOcrProvider } from '../services/aadhaar-ocr-provider.js';
 import type { PincodeProvider } from '../services/pincode-provider.js';
@@ -66,7 +67,6 @@ export type RegistrationResult<T> = { ok: true; value: T } | RegistrationFailure
 
 const NAME_RE = /^[A-Za-z][A-Za-z .'-]{1,79}$/u;
 const AADHAAR_RE = /^\d{12}$/;
-const PINCODE_RE = /^[1-9]\d{5}$/;
 
 export interface RegistrationServiceOptions {
   readonly store: RegistrationSessionStore;
@@ -86,12 +86,35 @@ export interface RegistrationServiceOptions {
   readonly now?: () => number;
 }
 
+/**
+ * Personal-information input for the first registration step.
+ *
+ * The name arrives as three SEPARATE parts (first / middle / last) rather than
+ * one combined string. `fullName` is still accepted as a legacy fallback so an
+ * older client or an in-flight session keeps working; when the parts are
+ * present they are authoritative and the service composes `fullName` itself.
+ *
+ * Nothing in this shape is "verified" by being well-formed: Aadhaar and PAN
+ * here are format-checked only. A real provider (when one is configured) is the
+ * only thing that can assert authenticity, and the response never claims it.
+ */
 export interface PersonalDetailsInput {
-  readonly fullName: string;
+  readonly firstName?: string;
+  readonly middleName?: string;
+  readonly lastName?: string;
+  /** Legacy combined name. Used only when the parts are absent. */
+  readonly fullName?: string;
   readonly aadhaarNumber: string;
+  /** Optional PAN. Format-validated when present; never a verification claim. */
+  readonly panNumber?: string;
+  /** Full free-text address. GPS-resolved or hand-typed, always editable. */
   readonly addressOnAadhaar?: string;
+  readonly city?: string;
+  readonly state?: string;
   readonly pincode?: string;
   readonly dateOfBirth: string;
+  /** Country calling code, e.g. "+91". Defaults to +91 when omitted. */
+  readonly mobileCountryCode?: string;
   readonly mobile: string;
 }
 
@@ -204,6 +227,7 @@ export class RegistrationService {
       sessionToken,
       walletAddress: null,
       personalPiiCipherText: null,
+      personalCompletedAt: null,
       maskedMobile: null,
       maskedAadhaar: null,
       aadhaarOcrCipherText: null,
@@ -241,24 +265,83 @@ export class RegistrationService {
   }
 
   // ── Personal details + pincode ──────────────────────────────────
+  //
+  // This is PHASE 1 of the two-phase personal step. It validates and stores the
+  // encrypted PII record only; the step is NOT complete yet. `personalVerified`
+  // is additionally gated on a verified phone number (see toRegistrationStatus),
+  // so the citizen must confirm the number over SMS or WhatsApp before the
+  // stepper can advance. `completePersonal()` is the explicit phase-2 gate the
+  // Continue button calls.
 
   async personal(token: string, input: PersonalDetailsInput): Promise<RegistrationResult<RegistrationStatus>> {
     const session = this.mustLoad(token);
     if (session === null) return { ok: false, reason: 'not-found' };
 
     const issues: string[] = [];
-    const fullName = input.fullName.trim();
-    if (!NAME_RE.test(fullName)) issues.push('Enter a valid full name.');
+
+    // ── Name: three parts, first + last required, middle optional ──
+    const firstName = (input.firstName ?? '').trim().replace(/\s+/g, ' ');
+    const middleName = (input.middleName ?? '').trim().replace(/\s+/g, ' ');
+    const lastName = (input.lastName ?? '').trim().replace(/\s+/g, ' ');
+    const legacyFullName = (input.fullName ?? '').trim().replace(/\s+/g, ' ');
+
+    let fullName: string;
+    if (firstName || lastName) {
+      if (!isValidNamePart(firstName)) issues.push('Enter a valid first name.');
+      if (middleName && !isValidNamePart(middleName)) issues.push('Enter a valid middle name.');
+      if (!isValidNamePart(lastName)) issues.push('Enter a valid last name.');
+      // Composed once, here, so the Aadhaar-OCR name match keeps comparing
+      // against exactly one canonical string (unchanged behaviour downstream).
+      fullName = [firstName, middleName, lastName].filter(Boolean).join(' ');
+    } else if (legacyFullName) {
+      // Legacy client: accept the combined name, still validated the old way.
+      if (!NAME_RE.test(legacyFullName)) issues.push('Enter a valid full name.');
+      fullName = legacyFullName;
+    } else {
+      issues.push('Enter your first and last name.');
+      fullName = '';
+    }
+
     const aadhaarNumber = input.aadhaarNumber.replace(/\s/g, '');
     if (!AADHAAR_RE.test(aadhaarNumber)) issues.push('Aadhaar must be exactly 12 digits.');
-    const addressOnAadhaar = input.addressOnAadhaar?.trim() ?? '';
+
+    // PAN is optional. When supplied it must be well-formed, but a valid FORMAT
+    // is never reported to the citizen as "PAN verified".
+    const panRaw = (input.panNumber ?? '').trim();
+    const pan = panRaw ? normalizePan(panRaw) : null;
+    if (panRaw && pan === null) issues.push('Enter a valid PAN (e.g. ABCDE1234F).');
+
+    const addressOnAadhaar = (input.addressOnAadhaar ?? '').trim();
     if (addressOnAadhaar.length > 200) issues.push('Address must be 200 characters or fewer.');
-    const pincode = input.pincode?.trim() ?? '';
-    if (pincode && !PINCODE_RE.test(pincode)) issues.push('Enter a valid 6-digit pincode.');
+
+    const city = (input.city ?? '').trim();
+    if (city.length > 80) issues.push('City must be 80 characters or fewer.');
+
+    const state = (input.state ?? '').trim();
+    if (state.length > 80) issues.push('State must be 80 characters or fewer.');
+    else if (state && !isIndianState(state)) issues.push('Select a valid Indian state or union territory.');
+
+    const pincode = (input.pincode ?? '').trim();
+    if (pincode && !isValidIndianPincode(pincode)) issues.push('Enter a valid 6-digit pincode.');
+
     const dateOfBirth = input.dateOfBirth.trim();
     if (!model.isValidPastDate(dateOfBirth)) issues.push('Enter a valid past date of birth.');
-    const mobileE164 = normalizeIndianMobile(input.mobile) ?? '';
-    if (!mobileE164) issues.push('Enter a valid Indian mobile number.');
+
+    // The country code is captured explicitly and the number is validated
+    // against that country's dialling plan, so the stored E.164 always matches
+    // what the citizen dialled. A number is never silently re-mapped onto
+    // another country's plan.
+    const countryCodeRaw = (input.mobileCountryCode ?? '').trim() || '+91';
+    const countryCode = normalizeCountryCode(countryCodeRaw);
+    if (countryCode === null) {
+      issues.push('Enter a valid country code.');
+    } else if (!isSupportedCallingCode(countryCode)) {
+      issues.push('That country code is not supported.');
+    }
+    const mobileE164 = buildE164(countryCodeRaw, input.mobile) ?? '';
+    if (!mobileE164 && issues.length === 0) {
+      issues.push(`Enter a valid ${countryCode ?? countryCodeRaw} phone number.`);
+    }
 
     if (issues.length > 0) return { ok: false, reason: 'invalid-input', issues };
 
@@ -270,7 +353,7 @@ export class RegistrationService {
       const lookup = await this.pincodeProvider.lookup(pincode);
       if (!lookup.ok) {
         console.warn(
-          `[priestate] registration personal: pincode ${pincode} could not be verified against India Post (provider=${this.pincodeProvider.name}, reason=${lookup.reason}) — failing closed.`,
+          `[priestate] registration personal: pincode could not be verified against India Post (provider=${this.pincodeProvider.name}, reason=${lookup.reason}) — failing closed.`,
         );
         return { ok: false, reason: 'provider-error', message: 'Pincode verification is temporarily unavailable. Please try again shortly.' };
       }
@@ -279,30 +362,108 @@ export class RegistrationService {
       }
     }
 
+    // Encrypted at rest. No field here is ever written to a public ledger, and
+    // the PIN is never logged (the old warn line printed it; that is removed).
     const profileCipher = this.accounts.encryptAtRest({
       fullName,
+      firstName: firstName || undefined,
+      middleName: middleName || undefined,
+      lastName: lastName || undefined,
       aadhaarNumber,
+      panNumber: pan ?? undefined,
       addressOnAadhaar: addressOnAadhaar || undefined,
+      city: city || undefined,
+      state: state || undefined,
       pincode: pincode || undefined,
       dateOfBirth,
       mobileE164,
     });
     if (!profileCipher) return { ok: false, reason: 'unavailable', message: 'Registration is unavailable right now.' };
 
-    const maskedMobile =
-      mobileE164.slice(0, 3) + '••••' + mobileE164.slice(-2);
+    // Mask on the CALLING CODE, not a fixed character count: "+91…10" and
+    // "+44…56" and "+971…78" are all legitimate, and truncating "+971" to "+97"
+    // would display a country code the citizen never dialled.
+    const maskedMobile = `${countryCode ?? '+91'}••••${mobileE164.slice(-2)}`;
     const now = this.now();
     const patch: RegistrationSessionPatch = {
       personalPiiCipherText: profileCipher,
       maskedMobile,
       maskedAadhaar: maskAadhaar(aadhaarNumber),
+      // Editing the details invalidates any earlier phone confirmation: the
+      // number may have changed, so both channels must be proven again. It also
+      // revokes the Continue the citizen had already given.
       smsOtpVerified: false,
       smsOtpVerifiedAt: null,
       whatsappOtpVerified: false,
       whatsappOtpVerifiedAt: null,
+      personalCompletedAt: null,
     };
     const updated = this.store.update(token, patch) ?? session;
     return { ok: true, value: this.snapshot(updated, now) };
+  }
+
+  /**
+   * PHASE 2 of the personal step: the explicit gate the Continue button calls.
+   *
+   * Refuses until the stored phone number has been confirmed over a REAL
+   * channel (SMS or WhatsApp — either satisfies it). This is what makes the
+   * Continue button server-authoritative rather than a client-side fiction.
+   */
+  completePersonal(token: string): RegistrationResult<RegistrationStatus> {
+    const session = this.mustLoad(token);
+    if (session === null) return { ok: false, reason: 'not-found' };
+    if (!session.personalPiiCipherText || !session.maskedMobile) {
+      return { ok: false, reason: 'bad-state', message: 'Complete personal details first.' };
+    }
+    if (!session.smsOtpVerified && !session.whatsappOtpVerified) {
+      return {
+        ok: false,
+        reason: 'bad-state',
+        message: 'Verify your phone number over SMS or WhatsApp before continuing.',
+      };
+    }
+    // Durable, so the advance survives a reload and cannot be replayed by a
+    // client that simply stops asking. Editing the details clears it again.
+    const completed = this.store.update(token, { personalCompletedAt: this.now() }) ?? session;
+    return { ok: true, value: this.snapshot(completed, this.now()) };
+  }
+
+  /**
+   * Reverse-geocode a coordinate pair into an address the citizen can edit.
+   *
+   * Coordinates are used ONLY to derive a starting address — they are never
+   * stored, never returned to the client as coordinates, and never placed on a
+   * public ledger. The raw GPS pair stays in this request.
+   */
+  async reverseGeocode(
+    token: string,
+    lat: number,
+    lng: number,
+  ): Promise<RegistrationResult<{ address: string; city: string; state: string; pincode: string }>> {
+    const session = this.mustLoad(token);
+    if (session === null) return { ok: false, reason: 'not-found' };
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+      return { ok: false, reason: 'invalid-input', issues: ['That location could not be read.'] };
+    }
+    if (!this.geocodingProvider.configured) {
+      return { ok: false, reason: 'unavailable', message: 'Address lookup is temporarily unavailable. Enter your address manually.' };
+    }
+    // Street-level zoom: a postal address form needs the road/landmark parts and
+    // the postcode, neither of which the settlement-level default returns.
+    const outcome = await this.geocodingProvider.reverse(lat, lng, 18);
+    if (!outcome.ok) {
+      return { ok: false, reason: 'provider-error', message: 'That address could not be resolved. Enter it manually.' };
+    }
+    return {
+      ok: true,
+      value: {
+        address: outcome.displayName ?? '',
+        // Prefer the settlement itself; `district` names the enclosing ward.
+        city: outcome.city ?? outcome.district ?? '',
+        state: outcome.state ?? '',
+        pincode: outcome.postcode ?? '',
+      },
+    };
   }
 
   // ── Aadhaar document OCR (real provider) ─────────────────────────
@@ -648,8 +809,9 @@ export class RegistrationService {
     if (!session.personalPiiCipherText) missing.push('Personal details');
     if (session.aadhaarDocumentStatus !== 'verified') missing.push('Aadhaar document');
     if (!session.emailVerified) missing.push('Email');
-    if (!session.smsOtpVerified) missing.push('SMS OTP');
-    if (!session.whatsappOtpVerified) missing.push('WhatsApp OTP');
+    // Phone is EITHER-or: one real channel (SMS or WhatsApp) is enough. The
+    // citizen picks their method; we never require both.
+    if (!session.smsOtpVerified && !session.whatsappOtpVerified) missing.push('Phone verification');
     if (!session.aadhaarMobileLinked) missing.push('Aadhaar-mobile link');
     if (!session.passwordHash || !session.passwordSalt) missing.push('Password');
     if (session.photoStatus !== 'verified') missing.push('Photo');

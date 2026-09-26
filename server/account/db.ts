@@ -121,6 +121,10 @@ const MIGRATIONS_SQL: readonly string[] = [
   `ALTER TABLE accounts ADD COLUMN identity_evidence_accepted_at INTEGER`,
   `ALTER TABLE accounts ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE accounts ADD COLUMN email_verified_at INTEGER`,
+  // The personal step is completed by an explicit Continue, not implicitly by
+  // the phone OTP landing. Tracked separately from the OTP flags so the stepper
+  // cannot advance on verification alone.
+  `ALTER TABLE registration_sessions ADD COLUMN personal_completed_at INTEGER`,
 ];
 
 /**

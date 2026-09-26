@@ -2563,6 +2563,104 @@ select.form-input {
   font-style: italic;
 }
 
+/* ── Personal Information form ──────────────────────────────────────
+   Grouped fieldsets for the registration step, matching the existing
+   PRIESTATE form design. Kept additive: every pre-existing rule above
+   is untouched. */
+
+.form-fieldset {
+  border: 1px solid var(--color-border-subtle, rgba(255, 255, 255, 0.08));
+  border-radius: var(--radius-sm);
+  padding: 1rem 1.1rem 1.1rem;
+  margin: 1.25rem 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.form-fieldset .form-field,
+.form-fieldset .account-card-actions {
+  margin-top: 0;
+}
+
+.form-legend {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  padding: 0 0.4rem;
+  margin-left: -0.4rem;
+}
+
+/* Required-field marker. The asterisk is decorative; the inputs carry
+   aria-required so assistive tech announces the real requirement. */
+.form-required {
+  color: var(--color-error);
+  font-weight: 700;
+}
+
+.form-optional {
+  color: var(--color-text-muted);
+  font-weight: 400;
+  font-style: italic;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.form-error {
+  display: block;
+  font-size: 0.7rem;
+  color: var(--color-error);
+  margin-top: 4px;
+  font-weight: 500;
+}
+
+/* Verification-method radio pair (SMS / WhatsApp). */
+.verify-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.8rem;
+  border: 1px solid var(--color-border-subtle, rgba(255, 255, 255, 0.08));
+  border-radius: 999px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.verify-choice input {
+  accent-color: var(--color-accent);
+  margin: 0;
+}
+
+.verify-choice-on {
+  border-color: var(--color-accent);
+  background: rgba(124, 90, 255, 0.1);
+}
+
+/* A channel whose provider is not configured stays visible but muted —
+   the citizen must be able to SEE that it exists and is unavailable. */
+.verify-choice-off {
+  opacity: 0.55;
+}
+
+/* Non-blocking advisory (permission denied, geocode failure, provider
+   unavailable) — distinct from .status-msg.error, which is a hard stop. */
+.status-msg.warn {
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.18);
+  color: #fbbf24;
+}
+
+.status-msg.warn p {
+  margin: 0 0 0.5rem;
+}
+
+.status-msg.warn .btn {
+  margin-top: 0.25rem;
+}
+
 .form-field-row {
   display: grid;
   grid-template-columns: 1fr 1fr;

@@ -98,6 +98,7 @@ function completeSession(): RegistrationSession {
     sessionToken: REG_TOKEN,
     walletAddress: null,
     personalPiiCipherText: 'fake-pii-ciphertext-ok',
+    personalCompletedAt: Date.now(),
     maskedMobile: '987XXXX110',
     maskedAadhaar: 'XXXX XXXX 3444',
     aadhaarOcrCipherText: null,

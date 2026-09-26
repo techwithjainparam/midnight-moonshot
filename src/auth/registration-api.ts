@@ -129,12 +129,25 @@ export async function beginRegistration(): Promise<
   return postJson('/v1/registration/begin', {});
 }
 
+/**
+ * Personal Information (registration step 1), phase 1.
+ *
+ * The name is three separate parts — there is deliberately no combined
+ * full-name field. The server composes the canonical name it stores.
+ */
 export interface RegistrationPersonalInput {
-  readonly fullName: string;
+  readonly firstName: string;
+  readonly middleName?: string;
+  readonly lastName: string;
   readonly aadhaarNumber: string;
+  /** Optional PAN — format-validated server-side, never a verification claim. */
+  readonly panNumber?: string;
   readonly addressOnAadhaar?: string;
+  readonly city?: string;
+  readonly state?: string;
   readonly pincode?: string;
   readonly dateOfBirth: string;
+  readonly mobileCountryCode?: string;
   readonly mobile: string;
 }
 
@@ -143,6 +156,40 @@ export async function submitRegistrationPersonal(
   input: RegistrationPersonalInput,
 ): Promise<RegistrationApiResult<RegistrationStatus>> {
   return postJson('/v1/registration/personal', input);
+}
+
+/**
+ * POST /api/v1/registration/personal/complete — phase 2.
+ *
+ * The explicit Continue gate. It fails closed unless the stored phone number
+ * has already been verified over SMS or WhatsApp, so the button reflects a
+ * server decision rather than a client-side assumption.
+ */
+export async function completeRegistrationPersonal(): Promise<
+  RegistrationApiResult<RegistrationStatus>
+> {
+  return postJson('/v1/registration/personal/complete', {});
+}
+
+/** Address resolved from a coordinate pair by the server-side geocoder. */
+export interface RegistrationReverseGeocode {
+  readonly address: string;
+  readonly city: string;
+  readonly state: string;
+  readonly pincode: string;
+}
+
+/**
+ * POST /api/v1/registration/personal/reverse-geocode
+ *
+ * The browser sends its coordinates once; the server resolves them and returns
+ * only a human-readable address. Coordinates are not stored or echoed back.
+ */
+export async function reverseGeocodeRegistrationAddress(
+  lat: number,
+  lng: number,
+): Promise<RegistrationApiResult<RegistrationReverseGeocode>> {
+  return postJson('/v1/registration/personal/reverse-geocode', { lat, lng });
 }
 
 /** POST /api/v1/registration/aadhaar-document (multipart; server-side real OCR). */
@@ -266,6 +313,8 @@ export async function finalizeRegistration(): Promise<
 //    "submitRegistration" substring, which is guarded by the privacy test). ──
 
 export const postPersonal = submitRegistrationPersonal;
+export const postPersonalComplete = completeRegistrationPersonal;
+export const postReverseGeocode = reverseGeocodeRegistrationAddress;
 export const postEmail = submitRegistrationEmail;
 export const postLivenessEvidence = submitRegistrationLivenessEvidence;
 export const postLocation = submitRegistrationLocation;

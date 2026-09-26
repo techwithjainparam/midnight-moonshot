@@ -26,6 +26,13 @@ export interface RegistrationSession {
   readonly walletAddress: string | null;
   /** Encrypted personal profile { fullName, aadhaarNumber, … , email }. */
   readonly personalPiiCipherText: string | null;
+  /**
+   * When the citizen explicitly pressed Continue on the personal step. Kept
+   * separate from the SMS/WhatsApp flags on purpose: verifying the phone only
+   * proves the number, so it must not silently advance the stepper. Editing the
+   * details again clears this.
+   */
+  readonly personalCompletedAt: number | null;
   readonly maskedMobile: string | null;
   readonly maskedAadhaar: string | null;
   /** Encrypted Aadhaar-document OCR extraction { fullName, dob, gender, address }. */
@@ -66,6 +73,10 @@ export interface RegistrationStatus {
   readonly emailVerified: boolean;
   readonly smsOtpVerified: boolean;
   readonly whatsappOtpVerified: boolean;
+  /** Either channel satisfies phone verification (SMS OR WhatsApp). */
+  readonly phoneVerified: boolean;
+  /** Which channel actually proved the number, when one has. */
+  readonly phoneChannel: 'sms' | 'whatsapp' | null;
   readonly aadhaarMobileLinked: boolean;
   readonly passwordSet: boolean;
   readonly photoStatus: 'unverified' | 'verified';
@@ -84,14 +95,26 @@ export function toRegistrationStatus(
   maskedEmail: string | null,
 ): RegistrationStatus | null {
   if (!session) return null;
+  // `personalVerified` is the stepper's "personal step is done" signal, and it
+  // needs ALL THREE of:
+  //   1. the encrypted PII actually stored,
+  //   2. the captured phone number proven over a real channel (SMS or
+  //      WhatsApp — never both), and
+  //   3. the citizen's own explicit Continue.
+  // Requiring (3) keeps the advance server-side rather than letting a verified
+  // OTP silently jump the stepper past the review the citizen still owes.
+  const phoneVerified = session.smsOtpVerified || session.whatsappOtpVerified;
   return {
     walletAddress: session.walletAddress,
     active: session.finalizedAt === null,
-    personalVerified: session.personalPiiCipherText !== null,
+    personalVerified:
+      session.personalPiiCipherText !== null && phoneVerified && session.personalCompletedAt !== null,
     aadhaarDocumentStatus: session.aadhaarDocumentStatus,
     emailVerified: session.emailVerified,
     smsOtpVerified: session.smsOtpVerified,
     whatsappOtpVerified: session.whatsappOtpVerified,
+    phoneVerified,
+    phoneChannel: session.smsOtpVerified ? 'sms' : session.whatsappOtpVerified ? 'whatsapp' : null,
     aadhaarMobileLinked: session.aadhaarMobileLinked,
     passwordSet: session.passwordHash !== null,
     photoStatus: session.photoStatus,
@@ -121,6 +144,7 @@ interface Row {
   session_token: string;
   wallet_address: string | null;
   personal_pii_ciphertext: string | null;
+  personal_completed_at: number | null;
   masked_mobile: string | null;
   masked_aadhaar: string | null;
   aadhaar_ocr_ciphertext: string | null;
@@ -152,6 +176,7 @@ function rowToSession(r: Row): RegistrationSession {
     sessionToken: r.session_token,
     walletAddress: r.wallet_address ?? null,
     personalPiiCipherText: r.personal_pii_ciphertext ?? null,
+    personalCompletedAt: r.personal_completed_at ?? null,
     maskedMobile: r.masked_mobile ?? null,
     maskedAadhaar: r.masked_aadhaar ?? null,
     aadhaarOcrCipherText: r.aadhaar_ocr_ciphertext ?? null,
@@ -184,6 +209,7 @@ function sessionToRow(s: RegistrationSession): Row {
     session_token: s.sessionToken,
     wallet_address: s.walletAddress,
     personal_pii_ciphertext: s.personalPiiCipherText,
+    personal_completed_at: s.personalCompletedAt,
     masked_mobile: s.maskedMobile,
     masked_aadhaar: s.maskedAadhaar,
     aadhaar_ocr_ciphertext: s.aadhaarOcrCipherText,
@@ -213,6 +239,7 @@ function sessionToRow(s: RegistrationSession): Row {
 
 const RECORD_FIELD: Record<string, keyof RegistrationSession> = {
   personal_pii_ciphertext: 'personalPiiCipherText',
+  personal_completed_at: 'personalCompletedAt',
   masked_mobile: 'maskedMobile',
   masked_aadhaar: 'maskedAadhaar',
   aadhaar_ocr_ciphertext: 'aadhaarOcrCipherText',

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import ProductBanner from '../components/ProductBanner';
 import BiometricEnrollment from '../components/BiometricEnrollment';
@@ -7,6 +7,20 @@ import ServerRegistrationLiveness, {
   type ServerLivenessEvidenceResult,
 } from '../components/ServerRegistrationLiveness';
 import { maskAadhaar } from '../auth/account-types';
+import {
+  DEFAULT_COUNTRY_CODE,
+  EARLIEST_BIRTH_DATE,
+  INDIAN_STATES,
+  isPersonalFormComplete,
+  maskPan,
+  normalizePan,
+  todayIso,
+  validatePersonalForm,
+  type PersonalFormValues,
+  type PersonalFieldName,
+  type DiallingPlan,
+  DIALLING_PLANS,
+} from '../registration/personal-validation';
 import {
   REGISTRATION_STAGE_LABELS,
   REGISTRATION_STAGE_ORDER,
@@ -23,6 +37,8 @@ import {
   fetchRegistrationCapabilities,
   fetchRegistrationStatus,
   postPersonal,
+  completeRegistrationPersonal,
+  reverseGeocodeRegistrationAddress,
   uploadAadhaarDocument,
   postEmail,
   verifyRegistrationEmailOtp,
@@ -113,20 +129,72 @@ export default function UserRegistrationPage() {
   // when the cookie is already live (resumed) so `begin` is not re-called.
   const [sessionStarted, setSessionStarted] = useState(false);
 
-  // ── Personal-form state ──────────────────────────────────────────
-  const [fullName, setFullName] = useState('');
-  // Canonical Aadhaar value: RAW DIGITS ONLY, never a masked string. The
-  // mask is presentation-only and is driven by `aadhaarFocused`, so a focused
-  // field always shows the complete raw digits. That keeps `onChange` reading
-  // real input — previously the handler re-parsed the *masked* DOM value
-  // (`•••• 9012`), whose leading 8 digits were stripped by `.replace(/\D/g,'')`
-  // and silently lost, producing a short Aadhaar and a 400 invalid-input.
+  // ── Personal Information form state ─────────────────────────────
+  //
+  // The name is three separate fields — there is deliberately no single
+  // combined full-name input. Canonical Aadhaar value: RAW DIGITS ONLY, never a
+  // masked string. The mask is presentation-only and driven by `aadhaarFocused`,
+  // so a focused field always shows the complete raw digits and `onChange` never
+  // has to re-parse a masked DOM value (which used to silently drop the leading
+  // 8 digits and produce a short Aadhaar → 400). PAN follows the same rule.
+  const [firstName, setFirstName] = useState('');
+  const [middleName, setMiddleName] = useState('');
+  const [lastName, setLastName] = useState('');
   const [aadhaarNumber, setAadhaarNumber] = useState('');
   const [aadhaarFocused, setAadhaarFocused] = useState(false);
-  const [addressOnAadhaar, setAddressOnAadhaar] = useState('');
+  const [panNumber, setPanNumber] = useState('');
+  const [panFocused, setPanFocused] = useState(false);
+  const [address, setAddress] = useState('');
+  const [city, setCity] = useState('');
+  const [stateName, setStateName] = useState('');
   const [pincode, setPincode] = useState('');
   const [dateOfBirth, setDateOfBirth] = useState('');
+  const [countryCode, setCountryCode] = useState<string>(DEFAULT_COUNTRY_CODE);
+  /** Example number for the selected country, so the shape is never guessed. */
+  const phonePlaceholder = useMemo(() => {
+    const plan = DIALLING_PLANS.find((p) => `+${p.callingCode}` === countryCode);
+    if (!plan) return '';
+    const [min] = plan.nsnLength;
+    const prefix = plan.mobilePrefixes[0] ?? '9';
+    return prefix.padEnd(min, '0');
+  }, [countryCode]);
   const [mobile, setMobile] = useState('');
+  /** Reveal every inline error once the citizen has attempted to continue. */
+  const [showPersonalErrors, setShowPersonalErrors] = useState(false);
+  /** Fields the citizen has finished editing, so errors can surface on blur. */
+  const [personalTouched, setPersonalTouched] = useState<Partial<Record<PersonalFieldName, boolean>>>({});
+  const markTouched = useCallback((field: PersonalFieldName) => {
+    setPersonalTouched((t) => (t[field] ? t : { ...t, [field]: true }));
+  }, []);
+
+  // ── Phone verification (compulsory, SMS OR WhatsApp) ─────────────
+  type PhoneChannel = 'sms' | 'whatsapp';
+  const [phoneChannel, setPhoneChannel] = useState<PhoneChannel>('sms');
+  const [phoneCodeSent, setPhoneCodeSent] = useState(false);
+  const [phoneCode, setPhoneCode] = useState('');
+
+  // ── GPS address capture ──────────────────────────────────────────
+  type LocationPhase = 'idle' | 'requesting' | 'resolving' | 'resolved' | 'denied' | 'unavailable' | 'failed';
+  const [locationPhase, setLocationPhase] = useState<LocationPhase>('idle');
+  /** True once the citizen has typed in the address box themselves. */
+  const [addressTouched, setAddressTouched] = useState(false);
+  /**
+   * A resolved address that was NOT applied because the citizen had already
+   * edited the field. Held so it can be applied explicitly rather than
+   * silently overwriting their edit.
+   */
+  const [pendingFetched, setPendingFetched] = useState<{
+    address: string;
+    city: string;
+    state: string;
+    pincode: string;
+  } | null>(null);
+
+  // ── Two-phase personal submission state ──────────────────────────
+  /** Phase 1 has landed: the encrypted PII record exists server-side. */
+  const [personalSaved, setPersonalSaved] = useState(false);
+  /** Snapshot of the values that were actually saved, to detect later edits. */
+  const [savedValuesKey, setSavedValuesKey] = useState<string | null>(null);
 
   // ── Email / SMS / WhatsApp OTP state ─────────────────────────────
   const [email, setEmail] = useState('');
@@ -410,6 +478,46 @@ export default function UserRegistrationPage() {
 
   const step: RegistrationStep = status ? currentRegistrationStep(status) : 'personal';
 
+  // ── Personal Information: derived validation state ──────────────
+
+  const personalValues: PersonalFormValues = {
+    firstName,
+    middleName,
+    lastName,
+    countryCode,
+    mobile,
+    address,
+    city,
+    state: stateName,
+    pincode,
+    dateOfBirth,
+    aadhaarNumber,
+    panNumber,
+  };
+  const personalErrors = validatePersonalForm(personalValues);
+  const personalFormComplete = isPersonalFormComplete(personalValues);
+  /**
+   * Show a field's error once it has been BLURRED, or once a submit was
+   * attempted. Continue is disabled while the form is incomplete, so without
+   * the blur trigger the citizen would get no indication of WHICH field is
+   * wrong and could never surface the errors.
+   */
+  const errorFor = (field: PersonalFieldName): string | undefined =>
+    (showPersonalErrors || personalTouched[field] ? personalErrors[field] : undefined);
+  /** Editing any field after phase 1 invalidates the earlier phone proof. */
+  const personalValuesKey = JSON.stringify(personalValues);
+  const personalHasUnsavedEdits = personalSaved && savedValuesKey !== personalValuesKey;
+  /** Server-authoritative: has a real channel proven the stored number? */
+  const phoneVerified = status?.phoneVerified === true;
+  /** True when a previous session already stored the details. */
+  const detailsOnServer = personalSaved || Boolean(status?.maskedMobile);
+  const activeChannelConfigured =
+    phoneChannel === 'sms' ? caps?.smsConfigured === true : caps?.whatsappConfigured === true;
+  const anyChannelConfigured = caps?.smsConfigured === true || caps?.whatsappConfigured === true;
+  /** Continue unlocks only once the form is valid AND the phone is proven. */
+  const canContinuePersonal =
+    personalFormComplete && detailsOnServer && !personalHasUnsavedEdits && phoneVerified;
+
   return (
     <div className="page profile-page">
       <ProductBanner />
@@ -435,107 +543,521 @@ export default function UserRegistrationPage() {
             <div className="account-stage-eyebrow">
               Step {REGISTRATION_STAGE_ORDER.indexOf('personal') + 1} of {REGISTRATION_STAGE_ORDER.length} — {REGISTRATION_STAGE_LABELS.personal}
             </div>
-            <h2 className="account-section-title">Your Personal Details</h2>
+            <h2 className="account-section-title">Personal Information</h2>
             <p className="account-section-desc">
-              Enter the details exactly as they appear on your Aadhaar. Your
-              pincode is checked against real India Post data, and your details
-              are stored only as an encrypted record — never on a public ledger
-              and never with a wallet.
+              Enter your details as they appear on your Aadhaar. Everything on
+              this page is stored only as an encrypted record — never on a
+              public ledger, never tied to a wallet, and shown back to you only
+              masked. Your PIN code is checked against real India Post data.
             </p>
 
-            <div className="form-field">
-              <label className="form-label" htmlFor="reg-fullname">Full Name (as on Aadhaar)</label>
-              <input
-                id="reg-fullname"
-                type="text"
-                autoComplete="name"
-                className="form-input"
-                value={fullName}
-                onChange={(e) => setFullName(e.target.value)}
-              />
-            </div>
+            {/* ── Resume state: details already on the server ── */}
+            {detailsOnServer && (
+              <div className="status-msg success" role="status">
+                {phoneVerified
+                  ? `Phone number confirmed${
+                      status?.phoneChannel === 'whatsapp' ? ' via WhatsApp' : ' via SMS'
+                    }${status?.maskedMobile ? ` (${status.maskedMobile})` : ''}. You can continue.`
+                  : `Your details are saved${status?.maskedMobile ? ` for ${status.maskedMobile}` : ''}. Verify your phone number to continue.`}
+              </div>
+            )}
 
-            <div className="form-field">
-              <label className="form-label" htmlFor="reg-aadhaar">Aadhaar Number</label>
-              <input
-                id="reg-aadhaar"
-                type="text"
-                inputMode="numeric"
-                autoComplete="off"
-                className="form-input"
-                placeholder="•••• •••• 4321"
-                value={aadhaarFocused || aadhaarNumber.length !== 12 ? aadhaarNumber : maskAadhaar(aadhaarNumber)}
-                onFocus={() => setAadhaarFocused(true)}
-                onChange={(e) => setAadhaarNumber(e.target.value.replace(/\D/g, '').slice(0, 12))}
-                onBlur={() => setAadhaarFocused(false)}
-              />
-              <span className="form-hint">Masked after entry; only a masked fragment is ever kept.</span>
-            </div>
+            {/* ── Name: three separate fields ── */}
+            <fieldset className="form-fieldset">
+              <legend className="form-legend">Name</legend>
+              <div className="form-row">
+                <div className="form-field">
+                  <label className="form-label" htmlFor="reg-first-name">
+                    First Name <span className="form-required" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    id="reg-first-name"
+                    type="text"
+                    autoComplete="given-name"
+                    className={`form-input${errorFor('firstName') ? ' form-input-error' : ''}`}
+                    value={firstName}
+                    maxLength={40}
+                    aria-required="true"
+                    aria-invalid={errorFor('firstName') ? true : undefined}
+                    onChange={(e) => setFirstName(e.target.value)}
+                    onBlur={() => markTouched('firstName')}
+                  />
+                  {errorFor('firstName') && (
+                    <span className="form-error" role="alert">{errorFor('firstName')}</span>
+                  )}
+                </div>
+                <div className="form-field">
+                  <label className="form-label" htmlFor="reg-middle-name">
+                    Middle Name <span className="form-optional">(optional)</span>
+                  </label>
+                  <input
+                    id="reg-middle-name"
+                    type="text"
+                    autoComplete="additional-name"
+                    className={`form-input${errorFor('middleName') ? ' form-input-error' : ''}`}
+                    value={middleName}
+                    maxLength={40}
+                    onChange={(e) => setMiddleName(e.target.value)}
+                    onBlur={() => markTouched('middleName')}
+                  />
+                  {errorFor('middleName') && (
+                    <span className="form-error" role="alert">{errorFor('middleName')}</span>
+                  )}
+                </div>
+                <div className="form-field">
+                  <label className="form-label" htmlFor="reg-last-name">
+                    Last Name <span className="form-required" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    id="reg-last-name"
+                    type="text"
+                    autoComplete="family-name"
+                    className={`form-input${errorFor('lastName') ? ' form-input-error' : ''}`}
+                    value={lastName}
+                    maxLength={40}
+                    aria-required="true"
+                    aria-invalid={errorFor('lastName') ? true : undefined}
+                    onChange={(e) => setLastName(e.target.value)}
+                    onBlur={() => markTouched('lastName')}
+                  />
+                  {errorFor('lastName') && (
+                    <span className="form-error" role="alert">{errorFor('lastName')}</span>
+                  )}
+                </div>
+              </div>
+            </fieldset>
 
-            <div className="form-field">
-              <label className="form-label" htmlFor="reg-address">Address (as on Aadhaar)</label>
-              <input
-                id="reg-address"
-                type="text"
-                className="form-input"
-                value={addressOnAadhaar}
-                maxLength={200}
-                onChange={(e) => setAddressOnAadhaar(e.target.value)}
-              />
-            </div>
+            {/* ── Phone: country code + number, compulsory verification ── */}
+            <fieldset className="form-fieldset">
+              <legend className="form-legend">
+                Phone Number <span className="form-required" aria-hidden="true">*</span>
+              </legend>
+              <div className="form-row">
+                <div className="form-field">
+                  <label className="form-label" htmlFor="reg-country-code">Country Code</label>
+                  <select
+                    id="reg-country-code"
+                    className={`form-input${errorFor('countryCode') ? ' form-input-error' : ''}`}
+                    value={countryCode}
+                    onChange={(e) => setCountryCode(e.target.value)}
+                    onBlur={() => markTouched('countryCode')}
+                  >
+                    {DIALLING_PLANS.map((p: DiallingPlan) => (
+                      <option key={p.iso2} value={`+${p.callingCode}`}>
+                        +{p.callingCode} — {p.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="form-field">
+                  <label className="form-label" htmlFor="reg-mobile">Phone Number</label>
+                  <input
+                    id="reg-mobile"
+                    type="tel"
+                    inputMode="numeric"
+                    autoComplete="tel-national"
+                    maxLength={15}
+                    placeholder={phonePlaceholder}
+                    className={`form-input${errorFor('mobile') ? ' form-input-error' : ''}`}
+                    value={mobile}
+                    aria-required="true"
+                    aria-invalid={errorFor('mobile') ? true : undefined}
+                    onChange={(e) => setMobile(e.target.value.replace(/\D/g, '').slice(0, 15))}
+                    onBlur={() => markTouched('mobile')}
+                  />
+                  {errorFor('mobile') && (
+                    <span className="form-error" role="alert">{errorFor('mobile')}</span>
+                  )}
+                </div>
+              </div>
+              {/* A foreign number is routable, but the identity proof below is
+                  not: say so plainly rather than implying a foreign path. */}
+              {countryCode !== DEFAULT_COUNTRY_CODE && (
+                <p className="form-hint" role="note">
+                  Your verification code is sent to this number. Aadhaar, the PIN code
+                  and the state list remain Indian, so a foreign number does not change
+                  the documents you will be verified against.
+                </p>
+              )}
 
-            <div className="form-row">
+              {/* Verification method: EITHER channel satisfies the requirement. */}
               <div className="form-field">
-                <label className="form-label" htmlFor="reg-pincode">Pincode</label>
-                <input
-                  id="reg-pincode"
-                  type="text"
-                  inputMode="numeric"
-                  className="form-input"
-                  value={pincode}
-                  maxLength={6}
-                  onChange={(e) => setPincode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                <span className="form-label" id="phone-method-label">Verification method</span>
+                <div className="verify-mobile-row" role="radiogroup" aria-labelledby="phone-method-label">
+                  <label className={`verify-choice${phoneChannel === 'sms' ? ' verify-choice-on' : ''}${caps && !caps.smsConfigured ? ' verify-choice-off' : ''}`}>
+                    <input
+                      type="radio"
+                      name="phone-channel"
+                      value="sms"
+                      checked={phoneChannel === 'sms'}
+                      onChange={() => { setPhoneChannel('sms'); setPhoneCodeSent(false); setPhoneCode(''); }}
+                    />
+                    <span> SMS{caps && !caps.smsConfigured ? ' (not configured)' : ''}</span>
+                  </label>
+                  <label className={`verify-choice${phoneChannel === 'whatsapp' ? ' verify-choice-on' : ''}${caps && !caps.whatsappConfigured ? ' verify-choice-off' : ''}`}>
+                    <input
+                      type="radio"
+                      name="phone-channel"
+                      value="whatsapp"
+                      checked={phoneChannel === 'whatsapp'}
+                      onChange={() => { setPhoneChannel('whatsapp'); setPhoneCodeSent(false); setPhoneCode(''); }}
+                    />
+                    <span> WhatsApp{caps && !caps.whatsappConfigured ? ' (not configured)' : ''}</span>
+                  </label>
+                </div>
+                <span className="form-hint">Stored encrypted; always shown masked. We never print the code here.</span>
+              </div>
+
+              {/* Provider-unavailable state — never faked, never auto-accepted. */}
+              {caps && !anyChannelConfigured && (
+                <div className="status-msg error" role="alert">
+                  Phone verification is currently unavailable: no SMS or WhatsApp
+                  provider is configured. We will not proceed without verifying
+                  your number. Please contact support or try again later.
+                </div>
+              )}
+              {caps && anyChannelConfigured && !activeChannelConfigured && (
+                <div className="status-msg warn" role="status">
+                  {phoneChannel === 'sms' ? 'SMS' : 'WhatsApp'} delivery is not
+                  configured. Choose the other method to verify your number.
+                </div>
+              )}
+
+              {phoneVerified ? (
+                <div className="status-msg success" role="status">
+                  Phone number verified{status?.phoneChannel === 'whatsapp' ? ' via WhatsApp' : ' via SMS'}.
+                </div>
+              ) : !phoneCodeSent ? (
+                <div className="account-card-actions">
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => void handleVerifyPhone()}
+                    disabled={
+                      stepBusy ||
+                      (!personalFormComplete && !detailsOnServer) ||
+                      (caps ? !activeChannelConfigured : false)
+                    }
+                  >
+                    {stepBusy ? 'Sending…' : 'Verify Phone'}
+                  </button>
+                </div>
+              ) : (
+                <div className="form-field">
+                  <label className="form-label" htmlFor="reg-phone-code">
+                    Enter the code sent by {phoneChannel === 'sms' ? 'SMS' : 'WhatsApp'}
+                  </label>
+                  <div className="verify-mobile-row">
+                    <input
+                      id="reg-phone-code"
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      maxLength={6}
+                      placeholder="_ _ _ _ _ _"
+                      className="form-input"
+                      value={phoneCode}
+                      onChange={(e) => setPhoneCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    />
+                    <button
+                      className="btn btn-primary"
+                      onClick={() => void handleVerifyPhoneCode()}
+                      disabled={stepBusy || phoneCode.length !== 6}
+                    >
+                      {stepBusy ? 'Verifying…' : 'Confirm code'}
+                    </button>
+                  </div>
+                  <button
+                    className="btn btn-ghost"
+                    onClick={() => void handleVerifyPhone()}
+                    disabled={stepBusy}
+                  >
+                    Resend code
+                  </button>
+                </div>
+              )}
+              <span className="form-hint">
+                {status?.maskedMobile
+                  ? `A code will be sent to ${status.maskedMobile}.`
+                  : 'Your details are saved first, then the code is sent to that number.'}
+              </span>
+            </fieldset>
+
+            {/* ── Address with GPS capture ── */}
+            <fieldset className="form-fieldset">
+              <legend className="form-legend">
+                Address <span className="form-required" aria-hidden="true">*</span>
+              </legend>
+              <div className="account-card-actions">
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => void handleUseCurrentLocation()}
+                  disabled={stepBusy || locationPhase === 'requesting' || locationPhase === 'resolving'}
+                >
+                  {locationPhase === 'requesting'
+                    ? 'Requesting permission…'
+                    : locationPhase === 'resolving'
+                      ? 'Resolving address…'
+                      : 'Use My Current Location'}
+                </button>
+              </div>
+
+              {locationPhase === 'resolved' && (
+                <div className="status-msg success" role="status">
+                  Location detected. Review the address below and edit it if needed.
+                </div>
+              )}
+              {locationPhase === 'denied' && (
+                <div className="status-msg warn" role="alert">
+                  Location permission was denied. You can type your address manually below.
+                </div>
+              )}
+              {locationPhase === 'unavailable' && (
+                <div className="status-msg warn" role="alert">
+                  Address lookup is unavailable right now. You can type your address manually below.
+                </div>
+              )}
+              {locationPhase === 'failed' && (
+                <div className="status-msg warn" role="alert">
+                  We could not resolve an address from your location. You can type it manually below.
+                </div>
+              )}
+
+              {/* A resolved address that was NOT auto-applied over an edit. */}
+              {pendingFetched && (
+                <div className="status-msg warn" role="status">
+                  <p>A different address was resolved from your location. Your edited address was kept.</p>
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => {
+                      applyResolvedAddress(pendingFetched);
+                      setPendingFetched(null);
+                    }}
+                    disabled={stepBusy}
+                  >
+                    Use the resolved address instead
+                  </button>
+                </div>
+              )}
+
+              <div className="form-field">
+                <label className="form-label" htmlFor="reg-address">Full Address</label>
+                <textarea
+                  id="reg-address"
+                  className={`form-input${errorFor('address') ? ' form-input-error' : ''}`}
+                  rows={3}
+                  maxLength={200}
+                  value={address}
+                  aria-required="true"
+                  aria-invalid={errorFor('address') ? true : undefined}
+                  onChange={(e) => { setAddress(e.target.value); setAddressTouched(true); }}
                 />
-                {caps && !caps.pincodeConfigured && (
-                  <span className="form-hint">Pincode verification is temporarily unavailable.</span>
+                {errorFor('address') && (
+                  <span className="form-error" role="alert">{errorFor('address')}</span>
+                )}
+                <span className="form-hint">
+                  Editable at any time. Your precise coordinates are used once to
+                  look up the address and are never stored.
+                </span>
+              </div>
+            </fieldset>
+
+            {/* ── DOB / PIN / State / City ── */}
+            <fieldset className="form-fieldset">
+              <legend className="form-legend">Additional Details</legend>
+              <div className="form-row">
+                <div className="form-field">
+                  <label className="form-label" htmlFor="reg-dob">
+                    Date of Birth <span className="form-required" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    id="reg-dob"
+                    type="date"
+                    className={`form-input${errorFor('dateOfBirth') ? ' form-input-error' : ''}`}
+                    min={EARLIEST_BIRTH_DATE}
+                    max={todayIso()}
+                    value={dateOfBirth}
+                    aria-required="true"
+                    aria-invalid={errorFor('dateOfBirth') ? true : undefined}
+                    onChange={(e) => setDateOfBirth(e.target.value)}
+                    onBlur={() => markTouched('dateOfBirth')}
+                  />
+                  {errorFor('dateOfBirth') && (
+                    <span className="form-error" role="alert">{errorFor('dateOfBirth')}</span>
+                  )}
+                </div>
+                <div className="form-field">
+                  <label className="form-label" htmlFor="reg-pincode">
+                    PIN Code <span className="form-required" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    id="reg-pincode"
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={6}
+                    placeholder="560001"
+                    className={`form-input${errorFor('pincode') ? ' form-input-error' : ''}`}
+                    value={pincode}
+                    aria-required="true"
+                    aria-invalid={errorFor('pincode') ? true : undefined}
+                    onChange={(e) => setPincode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    onBlur={() => markTouched('pincode')}
+                  />
+                  {errorFor('pincode') ? (
+                    <span className="form-error" role="alert">{errorFor('pincode')}</span>
+                  ) : caps && !caps.pincodeConfigured ? (
+                    <span className="form-hint">PIN code verification is temporarily unavailable.</span>
+                  ) : (
+                    <span className="form-hint">Checked against India Post data when you continue.</span>
+                  )}
+                </div>
+              </div>
+              <div className="form-row">
+                <div className="form-field">
+                  <label className="form-label" htmlFor="reg-state">
+                    State <span className="form-required" aria-hidden="true">*</span>
+                  </label>
+                  <select
+                    id="reg-state"
+                    className={`form-input${errorFor('state') ? ' form-input-error' : ''}`}
+                    value={stateName}
+                    aria-required="true"
+                    aria-invalid={errorFor('state') ? true : undefined}
+                    onChange={(e) => setStateName(e.target.value)}
+                    onBlur={() => markTouched('state')}
+                  >
+                    <option value="">Select a state</option>
+                    {INDIAN_STATES.map((s) => (
+                      <option key={s} value={s}>{s}</option>
+                    ))}
+                  </select>
+                  {errorFor('state') && (
+                    <span className="form-error" role="alert">{errorFor('state')}</span>
+                  )}
+                </div>
+                <div className="form-field">
+                  <label className="form-label" htmlFor="reg-city">
+                    City <span className="form-required" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    id="reg-city"
+                    type="text"
+                    list="reg-city-options"
+                    autoComplete="address-level2"
+                    className={`form-input${errorFor('city') ? ' form-input-error' : ''}`}
+                    value={city}
+                    maxLength={80}
+                    aria-required="true"
+                    aria-invalid={errorFor('city') ? true : undefined}
+                    onChange={(e) => setCity(e.target.value)}
+                    onBlur={() => markTouched('city')}
+                  />
+                  <datalist id="reg-city-options">
+                    {[city, stateName].filter(Boolean).map((v) => (
+                      <option key={v} value={v} />
+                    ))}
+                  </datalist>
+                  {errorFor('city') && (
+                    <span className="form-error" role="alert">{errorFor('city')}</span>
+                  )}
+                </div>
+              </div>
+            </fieldset>
+
+            {/* ── Aadhaar + PAN ── */}
+            <fieldset className="form-fieldset">
+              <legend className="form-legend">Identity Documents</legend>
+              <div className="form-field">
+                <label className="form-label" htmlFor="reg-aadhaar">
+                  Aadhaar Card Number <span className="form-required" aria-hidden="true">*</span>
+                </label>
+                <input
+                  id="reg-aadhaar"
+                  type="password"
+                  inputMode="numeric"
+                  autoComplete="off"
+                  maxLength={12}
+                  placeholder="•••• •••• ••••"
+                  className={`form-input${errorFor('aadhaarNumber') ? ' form-input-error' : ''}`}
+                  value={aadhaarFocused || aadhaarNumber.length !== 12 ? aadhaarNumber : maskAadhaar(aadhaarNumber)}
+                  aria-required="true"
+                  aria-invalid={errorFor('aadhaarNumber') ? true : undefined}
+                  onFocus={() => setAadhaarFocused(true)}
+                  onChange={(e) => setAadhaarNumber(e.target.value.replace(/\D/g, '').slice(0, 12))}
+                  onBlur={() => { setAadhaarFocused(false); markTouched('aadhaarNumber'); }}
+                />
+                {errorFor('aadhaarNumber') ? (
+                  <span className="form-error" role="alert">{errorFor('aadhaarNumber')}</span>
+                ) : (
+                  <span className="form-hint">
+                    12 digits. Stored encrypted and never written to a public ledger.
+                    Format is checked here only — that is not an Aadhaar verification.
+                  </span>
                 )}
               </div>
               <div className="form-field">
-                <label className="form-label" htmlFor="reg-dob">Date of Birth</label>
+                <label className="form-label" htmlFor="reg-pan">
+                  PAN Card Number <span className="form-optional">(optional)</span>
+                </label>
                 <input
-                  id="reg-dob"
-                  type="date"
-                  className="form-input"
-                  value={dateOfBirth}
-                  onChange={(e) => setDateOfBirth(e.target.value)}
-                />
-              </div>
-            </div>
-
-            <div className="form-field">
-              <label className="form-label" htmlFor="reg-mobile">Mobile Number</label>
-              <div className="verify-mobile-row">
-                <span className="verify-mobile-prefix">+91</span>
-                <input
-                  id="reg-mobile"
-                  type="tel"
-                  inputMode="numeric"
-                  autoComplete="tel-national"
+                  id="reg-pan"
+                  type="password"
+                  autoComplete="off"
                   maxLength={10}
-                  className="form-input"
-                  placeholder="9876543210"
-                  value={mobile}
-                  onChange={(e) => setMobile(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                  placeholder="ABCDE1234F"
+                  className={`form-input${errorFor('panNumber') ? ' form-input-error' : ''}`}
+                  value={panFocused || !normalizePan(panNumber) ? panNumber : maskPan(panNumber)}
+                  aria-invalid={errorFor('panNumber') ? true : undefined}
+                  onFocus={() => setPanFocused(true)}
+                  onChange={(e) => setPanNumber(e.target.value.toUpperCase().slice(0, 10))}
+                  onBlur={() => { setPanFocused(false); markTouched('panNumber'); }}
                 />
+                {errorFor('panNumber') ? (
+                  <span className="form-error" role="alert">{errorFor('panNumber')}</span>
+                ) : (
+                  <span className="form-hint">
+                    Stored encrypted. Format is checked here only — we do not
+                    claim your PAN is verified without a real provider.
+                  </span>
+                )}
               </div>
-              <span className="form-hint">Used to send one-time login codes. Stored encrypted; shown only masked.</span>
-            </div>
+            </fieldset>
+
+            {personalHasUnsavedEdits && (
+              <div className="status-msg warn" role="status">
+                You changed a field after saving. Verify your phone number again
+                so we can confirm the number belongs to these details.
+              </div>
+            )}
 
             <div className="account-card-actions">
-              <button className="btn btn-primary btn-lg" onClick={() => void handlePersonal()} disabled={stepBusy}>
-                {stepBusy ? 'Saving…' : 'Save personal details'}
+              {detailsOnServer && (
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => void handlePersonal()}
+                  disabled={stepBusy}
+                >
+                  {stepBusy ? 'Saving…' : 'Save details'}
+                </button>
+              )}
+              <button
+                className="btn btn-primary btn-lg"
+                onClick={() => void handleContinuePersonal()}
+                disabled={stepBusy || !canContinuePersonal}
+              >
+                {stepBusy ? 'Continuing…' : 'Continue'}
               </button>
             </div>
+            {!canContinuePersonal && !stepBusy && (
+              <span className="form-hint">
+                {!personalFormComplete
+                  ? 'Complete all required fields to continue.'
+                  : !detailsOnServer
+                    ? 'Save your details, then verify your phone number.'
+                    : personalHasUnsavedEdits
+                      ? 'Re-verify your phone number after your changes.'
+                      : 'Verify your phone number to continue.'}
+              </span>
+            )}
           </section>
         )}
 
@@ -927,36 +1449,252 @@ export default function UserRegistrationPage() {
 
   // ── Step handlers ────────────────────────────────────────────────
 
+  /**
+   * Registration begins here, wallet-free: `begin` takes NO wallet address and
+   * mints the HttpOnly session cookie. No wallet is connected or typed.
+   *
+   * Needed before anything session-scoped — including the GPS address lookup,
+   * which the server ties to the registration session so the upstream geocoder
+   * cannot be driven anonymously.
+   */
+  async function ensureSession(): Promise<boolean> {
+    if (sessionStarted) return true;
+    const begun = await beginRegistration();
+    if (!begun.ok) {
+      if (begun.reason === 'already-registered') {
+        navigate('/login/user', { replace: true });
+        return false;
+      }
+      setStepError(failureMessage(begun));
+      return false;
+    }
+    setSessionStarted(true);
+    return true;
+  }
+
+  /**
+   * Phase 1: validate and store the encrypted PII record.
+   *
+   * Returns whether the record is now on the server, so the phone flow can
+   * chain off it. The OTP gateways deliver to the STORED number, which is why
+   * this must land before a code can be sent.
+   */
+  async function savePersonalDetails(): Promise<boolean> {
+    setStepError(null);
+    if (!(await ensureSession())) return false;
+    const r = await postPersonal({
+      firstName: firstName.trim(),
+      middleName: middleName.trim() || undefined,
+      lastName: lastName.trim(),
+      aadhaarNumber: aadhaarNumber.replace(/\s/g, ''),
+      panNumber: panNumber.trim() || undefined,
+      addressOnAadhaar: address.trim() || undefined,
+      city: city.trim() || undefined,
+      state: stateName.trim() || undefined,
+      pincode: pincode.trim() || undefined,
+      dateOfBirth,
+      mobileCountryCode: countryCode,
+      mobile: mobile.replace(/\D/g, ''),
+    });
+    if (!r.ok) {
+      setStepError(failureMessage(r));
+      return false;
+    }
+    // `postPersonal` already returns the authoritative new status.
+    setStatus(r.data);
+    setPersonalSaved(true);
+    setSavedValuesKey(personalValuesKey);
+    return true;
+  }
+
   async function handlePersonal(): Promise<void> {
+    setShowPersonalErrors(true);
+    if (!personalFormComplete) {
+      setStepError('Please correct the highlighted fields before continuing.');
+      return;
+    }
+    setStepBusy(true);
+    try {
+      if (await savePersonalDetails()) {
+        setShowPersonalErrors(false);
+      }
+    } finally {
+      setStepBusy(false);
+    }
+  }
+
+  /**
+   * Phase 2: the explicit Continue gate.
+   *
+   * The phone must already be proven. The server re-checks this, so a stale or
+   * tampered client cannot skip it — it fails closed with bad-state.
+   */
+  async function handleContinuePersonal(): Promise<void> {
+    setStepError(null);
+    if (!personalFormComplete || personalHasUnsavedEdits) {
+      setShowPersonalErrors(true);
+      setStepError('Please correct the highlighted fields before continuing.');
+      return;
+    }
+    if (!detailsOnServer) {
+      setStepError('Save your details before verifying your phone number.');
+      return;
+    }
+    if (!phoneVerified) {
+      setStepError('Verify your phone number over SMS or WhatsApp before continuing.');
+      return;
+    }
+    setStepBusy(true);
+    try {
+      const r = await completeRegistrationPersonal();
+      if (r.ok) {
+        setStatus(r.data);
+      } else {
+        setStepError(failureMessage(r));
+      }
+    } finally {
+      setStepBusy(false);
+    }
+  }
+
+  /** "Use My Current Location" — browser GPS → server-side reverse geocode. */
+  async function handleUseCurrentLocation(): Promise<void> {
+    setStepError(null);
+    setPendingFetched(null);
+    if (typeof navigator === 'undefined' || !navigator.geolocation) {
+      setLocationPhase('unavailable');
+      return;
+    }
+    if (!caps?.geocodingConfigured) {
+      setLocationPhase('unavailable');
+      return;
+    }
+    // The geocoding endpoint is session-scoped so the upstream provider cannot
+    // be driven anonymously, and a citizen may look up their address BEFORE
+    // saving anything. Start the session first, otherwise the lookup 401s.
+    if (!(await ensureSession())) {
+      setLocationPhase('failed');
+      return;
+    }
+    setLocationPhase('requesting');
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        void (async () => {
+          setLocationPhase('resolving');
+          // The coordinate pair is sent once to resolve an address and is then
+          // discarded — it is never stored and never shown back to the citizen.
+          const r = await reverseGeocodeRegistrationAddress(pos.coords.latitude, pos.coords.longitude);
+          if (!r.ok) {
+            setLocationPhase(r.reason === 'unavailable' ? 'unavailable' : 'failed');
+            return;
+          }
+          const resolved = {
+            address: r.data.address,
+            city: r.data.city,
+            state: r.data.state,
+            pincode: r.data.pincode,
+          };
+          if (!resolved.address && !resolved.city) {
+            setLocationPhase('failed');
+            return;
+          }
+          // NEVER silently overwrite an address the citizen edited themselves.
+          if (addressTouched && (address.trim() || city.trim() || stateName.trim() || pincode.trim())) {
+            setPendingFetched(resolved);
+            setLocationPhase('resolved');
+            return;
+          }
+          applyResolvedAddress(resolved);
+          setLocationPhase('resolved');
+        })();
+      },
+      (err) => {
+        setLocationPhase(err.code === err.PERMISSION_DENIED ? 'denied' : 'failed');
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 },
+    );
+  }
+
+  function applyResolvedAddress(resolved: {
+    address: string;
+    city: string;
+    state: string;
+    pincode: string;
+  }): void {
+    if (resolved.address) setAddress(resolved.address);
+    // City / state / pincode stay editable; they are only prefilled when the
+    // citizen has not already typed their own.
+    if (resolved.city && !city.trim()) setCity(resolved.city);
+    if (resolved.state && !stateName.trim()) setStateName(resolved.state);
+    if (resolved.pincode && !pincode.trim()) setPincode(resolved.pincode.replace(/\D/g, '').slice(0, 6));
+    setAddressTouched(false);
+  }
+
+  /**
+   * Send the one-time code over the selected channel.
+   *
+   * Phase 1 lands first, because the gateways deliver to the stored number.
+   * When no provider is configured this surfaces the unavailable state instead
+   * of pretending a code was sent.
+   */
+  async function handleVerifyPhone(): Promise<void> {
+    setStepError(null);
+    setShowPersonalErrors(true);
+    // A resumed session already has the number on the server — only the MASKED
+    // form comes back, by design, so the local fields are empty. The OTP
+    // gateways deliver to the STORED number, so there is nothing to re-enter
+    // and nothing to re-save; requiring a locally complete form here would
+    // strand anyone who refreshed the page mid-verification.
+    const resuming = detailsOnServer && !personalHasUnsavedEdits;
+    if (!personalFormComplete && !resuming) {
+      setStepError('Please correct the highlighted fields before verifying your phone.');
+      return;
+    }
+    if (!activeChannelConfigured) {
+      setStepError(
+        phoneChannel === 'sms'
+          ? 'SMS delivery is not configured. Choose WhatsApp or try again later.'
+          : 'WhatsApp delivery is not configured. Choose SMS or try again later.',
+      );
+      return;
+    }
+    setStepBusy(true);
+    try {
+      // Only push details when they are actually complete on this device;
+      // re-saving a resumed session would needlessly revoke nothing but would
+      // also demand the full form again.
+      if (!resuming && !(await savePersonalDetails())) return;
+      const r =
+        phoneChannel === 'sms' ? await issueRegistrationSmsOtp() : await issueRegistrationWhatsappOtp();
+      if (r.ok) {
+        setPhoneCodeSent(true);
+        setPhoneCode('');
+      } else {
+        setPhoneCodeSent(false);
+        setStepError(failureMessage(r));
+      }
+    } finally {
+      setStepBusy(false);
+    }
+  }
+
+  /** Confirm the one-time code over the channel that issued it. */
+  async function handleVerifyPhoneCode(): Promise<void> {
     setStepError(null);
     setStepBusy(true);
     try {
-      // Registration begins here, wallet-free: `begin` takes NO wallet address
-      // and mints the HttpOnly session cookie. No wallet is connected or typed.
-      if (!sessionStarted) {
-        const begun = await beginRegistration();
-        if (!begun.ok) {
-          if (begun.reason === 'already-registered') {
-            navigate('/login/user', { replace: true });
-            return;
-          }
-          setStepError(failureMessage(begun));
-          return;
-        }
-        setSessionStarted(true);
-      }
-      const r = await postPersonal({
-        fullName: fullName.trim(),
-        aadhaarNumber: aadhaarNumber.replace(/\s/g, ''),
-        addressOnAadhaar: addressOnAadhaar.trim() || undefined,
-        pincode: pincode.trim() || undefined,
-        dateOfBirth,
-        mobile: mobile.replace(/\D/g, ''),
-      });
+      const r =
+        phoneChannel === 'sms'
+          ? await verifyRegistrationSmsOtp(phoneCode)
+          : await verifyRegistrationWhatsappOtp(phoneCode);
       if (r.ok) {
-        // `postPersonal` already returns the authoritative new status — no
-        // duplicate GET is needed here.
-        setStatus(r.data);
+        const st = await refreshStatus();
+        if (st?.phoneVerified) {
+          setPhoneCode('');
+          setPhoneCodeSent(false);
+        } else {
+          setStepError('That code was not accepted. Request a new one and try again.');
+        }
       } else {
         setStepError(failureMessage(r));
       }
