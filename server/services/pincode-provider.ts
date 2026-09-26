@@ -144,7 +144,7 @@ export class PostalIndiaPincodeProvider implements PincodeProvider {
     if (parsed === null) {
       if (attempts > 1) {
         console.warn(
-          `[priestate] pincode lookup ${pincode}: upstream unreachable after ${attempts} attempts within ${this.timeoutMs}ms each — keeping fail-closed.`,
+          `[priestate] pincode lookup: upstream unreachable after ${attempts} attempts within ${this.timeoutMs}ms each — keeping fail-closed.`,
         );
       }
       return { ok: false, reason: 'network-error' };

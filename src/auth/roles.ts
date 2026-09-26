@@ -98,14 +98,20 @@ export function determineRole(address: string): Role {
 }
 
 /**
- * Demo binding of registry records to "the current user".
+ * Registry-record ownership.
  *
- * There is no backend yet, so mock records cannot be tied to real wallet
- * addresses. For demonstration purposes every connected USER is treated
- * as the owner of these record ids. DEMO ONLY.
+ * SECURITY: ownership is NEVER decided in the browser. The previous build
+ * hardcoded a list of record ids that every connected wallet was treated as
+ * owning, which granted production users access to other people's records.
+ * That list is gone.
+ *
+ * A client-side id list is not authorization, so this now fails closed: no
+ * record is "owned" by the connected wallet on the strength of frontend
+ * state alone. Records are visible to a USER only when they are finalized
+ * and APPROVED (see `src/data/visibility.ts`). Real per-wallet ownership
+ * must come from a server-side authorization check — there is no such
+ * endpoint yet, so nothing claims to own anything.
  */
-export const DEMO_USER_PROPERTY_IDS: readonly string[] = ['reg-001', 'reg-003'];
-
-export function isOwnedByCurrentUser(propertyId: string): boolean {
-  return DEMO_USER_PROPERTY_IDS.includes(propertyId);
+export function isOwnedByCurrentUser(_propertyId: string): boolean {
+  return false;
 }

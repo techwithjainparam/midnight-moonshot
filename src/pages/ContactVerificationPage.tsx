@@ -16,7 +16,7 @@ import {
   contactVerificationProvider,
   identityVerificationProvider,
   AADHAAR_UNAVAILABLE_MESSAGE,
-  DEMO_MODE_SENT_MESSAGE,
+  VERIFICATION_UNAVAILABLE_MESSAGE,
 } from '../profile/providers';
 
 // FEATURE 1 — Contact & identity verification screen (REAL providers).
@@ -24,8 +24,8 @@ import {
 // Flow: Connect Wallet → first-time user? → verify at least ONE of:
 //
 //   • EMAIL          server-generated OTP delivered to the user's inbox;
-//                     verified server-side. The code is never displayed
-//                     in the browser and never stored client-side.
+//                     checked exclusively on the server. The code is never
+//                     accepted or stored client-side.
 //   • AADHAAR MOBILE  an authorized identity/KYC provider confirms the
 //                     mobile↔Aadhaar link (direct link check or an OTP
 //                     challenge to the REGISTERED mobile). Success is
@@ -71,9 +71,10 @@ export default function ContactVerificationPage() {
           Your connected wallet remains your primary PRIESTATE identity.
           Verify your email address or your Aadhaar-linked mobile number so
           we can notify you about registration updates, officer decisions,
-          ownership transfers, and important alerts. Verification codes are
-          sent and checked on our secure server — they are never shown in
-          the browser.
+          ownership transfers, and important alerts. A verification code is
+          delivered to your inbox by our secure server; you type it in here
+          and the server decides whether it is valid. This page can never
+          mark anything verified on its own.
         </p>
       </div>
 
@@ -199,7 +200,6 @@ function EmailVerificationCard({
   const [nowTick, setNowTick] = useState(Date.now());
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
-  const [demoMode, setDemoMode] = useState(false);
   const [code, setCode] = useState('');
   const [otpError, setOtpError] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
@@ -221,7 +221,7 @@ function EmailVerificationCard({
       if (!result.ok) {
         switch (result.reason) {
           case 'unavailable':
-            setSendError(DEMO_MODE_SENT_MESSAGE);
+            setSendError(VERIFICATION_UNAVAILABLE_MESSAGE);
             break;
           case 'cooldown':
           case 'rate-limited': {
@@ -240,7 +240,6 @@ function EmailVerificationCard({
       setPendingValue(value);
       setExpiresAt(result.challenge.expiresAt);
       setCooldownEndsAt(result.challenge.resendAvailableAt);
-      setDemoMode(Boolean(result.demoMode));
       setCode('');
       setOtpError(null);
       setStep('otp');
@@ -272,7 +271,6 @@ function EmailVerificationCard({
         setPendingValue(null);
         setExpiresAt(null);
         setCooldownEndsAt(null);
-        setDemoMode(false);
         return;
       }
       switch (result.reason) {
@@ -283,18 +281,18 @@ function EmailVerificationCard({
           setOtpError('Too many incorrect attempts. Send a new code and try again.');
           break;
         case 'unavailable':
-          setOtpError(DEMO_MODE_SENT_MESSAGE);
+          setOtpError(VERIFICATION_UNAVAILABLE_MESSAGE);
           break;
         case 'invalid':
-          setOtpError(demoMode ? 'Incorrect code. Use demo code 123456.' : 'Incorrect code. Check the code sent to your email and try again.');
+          setOtpError('Incorrect code. Check the code sent to your email and try again.');
           break;
         default:
-          setOtpError(demoMode ? 'Incorrect code. Use demo code 123456.' : 'Incorrect code. Check the code sent to your email and try again.');
+          setOtpError('Incorrect code. Check the code sent to your email and try again.');
       }
     } finally {
       setVerifying(false);
     }
-  }, [code, demoMode, onVerified, pendingValue]);
+  }, [code, onVerified, pendingValue]);
 
   const resendBlockedForS =
     cooldownEndsAt !== null && nowTick < cooldownEndsAt ? Math.ceil((cooldownEndsAt - nowTick) / 1000) : 0;
@@ -340,20 +338,13 @@ function EmailVerificationCard({
         </>
       ) : (
         <>
-          {demoMode && (
-            <div className="demo-mode-banner" role="status">
-              <span className="demo-mode-banner-icon" aria-hidden="true">⚠</span>
-              <span>Demo Mode — No email was sent. Use verification code <strong>123456</strong>.</span>
-            </div>
-          )}
-
           <p className="profile-otp-context">
             Enter the verification code sent to your email{' '}
             <strong>{pendingValue}</strong>.
           </p>
 
           {sendError && <div className="status-msg error" role="alert">{sendError}</div>}
-          {!demoMode && expiresAt !== null && nowTick < expiresAt && (
+          {expiresAt !== null && nowTick < expiresAt && (
             <p className="profile-otp-sent-note">
               The code expires {Math.ceil((expiresAt - nowTick) / 60000)} minute(s) after issue — request a new one if it does not arrive.
             </p>
@@ -384,7 +375,7 @@ function EmailVerificationCard({
             <button className="btn btn-ghost" onClick={() => pendingValue && void sendCode(pendingValue)} disabled={sending || resendBlockedForS > 0}>
               {resendBlockedForS > 0 ? `Resend in ${formatWait(resendBlockedForS)}` : 'Resend code'}
             </button>
-            <button className="btn btn-ghost" onClick={() => { setStep('input'); setOtpError(null); setSendError(null); setDemoMode(false); }}>
+            <button className="btn btn-ghost" onClick={() => { setStep('input'); setOtpError(null); setSendError(null); }}>
               Change Email
             </button>
           </div>
@@ -538,8 +529,8 @@ function AadhaarMobileCard({
       {available === false && (
         <p className="verify-card-desc">
           Aadhaar-linked mobile verification requires a live identity/KYC
-          provider connection, which is not available in this demo build.
-          Email verification is fully functional as a demo flow.
+          provider connection, which is not currently available. Email
+          verification remains available and is checked on our server.
         </p>
       )}
       {available !== false && (

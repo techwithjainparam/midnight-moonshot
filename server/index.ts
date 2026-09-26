@@ -653,7 +653,7 @@ encryptionSecret: overrides.accountEncryptionSecret ?? config.account?.encryptio
   function unavailableResponse(feature: 'email' | 'aadhaar'): { error: 'unavailable'; message: string } {
     return feature === 'email'
       ? { error: 'unavailable', message: 'Verification service unavailable.' }
-      : { error: 'unavailable', message: 'Aadhaar-linked mobile verification is not available in this demo.' };
+      : { error: 'unavailable', message: 'Aadhaar-linked mobile verification is not currently available.' };
   }
 
   // ── Routes ─────────────────────────────────────────────────────────

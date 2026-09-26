@@ -1,9 +1,13 @@
 // PRIESTATE — Record visibility rules for normal users (USER role).
 //
 // USER may see:
-// - their own application/property information (demo binding, see
-//   DEMO_USER_PROPERTY_IDS in src/auth/roles.ts)
 // - explicitly public registry information (finalized APPROVED records)
+//
+// Ownership is NOT decided here. `isOwnedByCurrentUser` fails closed (it
+// does not treat a connected wallet as the owner of anything), so a
+// USER-role viewer only ever sees finalized APPROVED records. Per-wallet
+// ownership requires a server-side authorization check; see
+// `isOwnedByCurrentUser` in src/auth/roles.ts.
 //
 // Anything else (other applicants' drafts/pending/rejected applications)
 // is restricted. Officer-only data (queue, internal notes) is never part

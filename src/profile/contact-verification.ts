@@ -265,7 +265,16 @@ export function saveVerifiedProfile(address: string, contactType: ContactType, c
   return { address: address.trim().toLowerCase(), contactType, contactValue, verifiedAt };
 }
 
-/** Record a successful Aadhaar-linked-mobile confirmation (receipt only). */
+/**
+ * Record a successful Aadhaar-linked-mobile confirmation (receipt only).
+ *
+ * FAILS CLOSED. The `verified` flag is DERIVED from the provider's own
+ * receipt — never asserted by this function. A record is only written when
+ * the caller supplies a real provider verification id together with a
+ * provider status that actually reports success; anything else throws and
+ * leaves the stored profile untouched. In particular an unconfigured Aadhaar
+ * provider can never produce a "verified" record here.
+ */
 export function recordAadhaarMobileVerified(
   address: string,
   input: {
@@ -275,12 +284,20 @@ export function recordAadhaarMobileVerified(
     verificationStatus?: string;
   },
 ): AadhaarMobileRecord {
+  const providerVerificationId = (input.providerVerificationId ?? '').trim();
+  const status = (input.verificationStatus ?? '').trim().toUpperCase();
+  const providerConfirmed = providerVerificationId.length > 0 && status === 'VERIFIED';
+  if (!providerConfirmed) {
+    throw new Error(
+      'Refusing to record Aadhaar-mobile verification: no confirmed provider receipt was supplied.',
+    );
+  }
   const record: AadhaarMobileRecord = {
     verified: true,
     mobile: input.mobile,
-    providerVerificationId: input.providerVerificationId,
+    providerVerificationId,
     providerName: input.providerName,
-    verificationStatus: input.verificationStatus ?? 'VERIFIED',
+    verificationStatus: status,
     verifiedAt: new Date().toISOString(),
   };
   updateProfile(address, (draft) => {
