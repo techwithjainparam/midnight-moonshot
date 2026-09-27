@@ -253,7 +253,7 @@ export default function UserLoginPage() {
     setBusy(true);
     try {
       if (!capsLoaded || !caps || !allFactorsConfigured) {
-        setLoginError('Login requires live SMS, WhatsApp, and Google factors, which are not all configured on the verification server in this demo.');
+        setLoginError('Login requires SMS, WhatsApp, and Google factors, which are not all currently available on the verification server.');
         return;
       }
       if (exists === false) {
@@ -385,7 +385,7 @@ export default function UserLoginPage() {
             {google.notice && <div className="status-msg info" role="status">{google.notice}</div>}
             {google.error && <div className="status-msg error" role="alert">{google.error}</div>}
             {!canFactor('google') && (
-              <span className="form-hint">Google login is not configured on the verification server in this demo.</span>
+              <span className="form-hint">Google login is not currently available.</span>
             )}
           </section>
         )}
@@ -414,7 +414,7 @@ export default function UserLoginPage() {
                 <button className="btn btn-ghost" onClick={() => void handleSendSms()}>Resend</button>
               </div>
             )}
-            {!canFactor('sms') && <span className="form-hint">SMS verification is not configured on the server in this demo.</span>}
+            {!canFactor('sms') && <span className="form-hint">SMS verification is not currently available.</span>}
           </section>
         )}
 
@@ -442,7 +442,7 @@ export default function UserLoginPage() {
                 <button className="btn btn-ghost" onClick={() => void handleSendWhatsapp()}>Resend</button>
               </div>
             )}
-            {!canFactor('whatsapp') && <span className="form-hint">WhatsApp verification is not configured on the server in this demo.</span>}
+            {!canFactor('whatsapp') && <span className="form-hint">WhatsApp verification is not currently available.</span>}
           </section>
         )}
 
@@ -533,7 +533,7 @@ export default function UserLoginPage() {
 function factorMsg(reason: string, message?: string): string {
   switch (reason) {
     case 'unavailable':
-      return message ?? 'not configured on the server in this demo.';
+      return message ?? 'not currently available on the server.';
     case 'unauthorized':
       return 'authorization failed.';
     case 'expired':
@@ -560,7 +560,7 @@ function otpMsg(reason: string, _message?: string): string {
     case 'too-many-attempts':
       return 'too many incorrect attempts — request a new code.';
     case 'unavailable':
-      return 'not configured on the server in this demo.';
+      return 'not currently available on the server.';
     default:
       return 'verification failed.';
   }

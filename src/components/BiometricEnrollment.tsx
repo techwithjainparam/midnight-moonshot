@@ -152,7 +152,7 @@ export default function BiometricEnrollment({ onEnrolled }: BiometricEnrollmentP
         setPhase('failed');
         setError(
           begin.reason === 'unavailable'
-            ? 'Biometric enrollment is not configured on the server in this demo.'
+            ? 'Biometric enrollment is not currently available.'
             : begin.reason === 'bad-state'
               ? 'This account is not ready for biometric enrollment right now.'
               : 'Could not begin biometric enrollment.',
@@ -168,7 +168,7 @@ export default function BiometricEnrollment({ onEnrolled }: BiometricEnrollmentP
         setPhase('failed');
         switch (done.reason) {
           case 'unavailable':
-            setError('Biometric enrollment is not configured on the server in this demo.');
+            setError('Biometric enrollment is not currently available.');
             break;
           case 'no-consent':
             setError('Consent is required to enroll a biometric reference.');

@@ -932,7 +932,7 @@ encryptionSecret: overrides.accountEncryptionSecret ?? config.account?.encryptio
         sendJson(res, 503, {
           ok: false,
           reason: 'unavailable',
-          message: 'This factor’s delivery channel is not configured in this demo.',
+          message: 'This factor’s delivery channel is not currently available.',
         });
         return;
       case 'delivery-failed':
