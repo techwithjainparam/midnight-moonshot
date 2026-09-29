@@ -392,8 +392,6 @@ encryptionSecret: overrides.accountEncryptionSecret ?? config.account?.encryptio
       accounts: accountService,
       mailer,
       otp: { hashSecret: otpHashSecret },
-      smsProvider,
-      whatsAppProvider,
       aadhaarProvider,
       aadhaarOcr: registrationAadhaarOcr,
       pincodeProvider: registrationPincode,
@@ -879,14 +877,6 @@ encryptionSecret: overrides.accountEncryptionSecret ?? config.account?.encryptio
         return void (await routeRegistrationEmail(req, res, body));
       case '/api/v1/registration/email/verify':
         return void (await routeRegistrationEmailVerify(req, res, body));
-      case '/api/v1/registration/sms/issue':
-        return void (await routeRegistrationSmsIssue(req, res));
-      case '/api/v1/registration/sms/verify':
-        return void (await routeRegistrationSmsVerify(req, res, body));
-      case '/api/v1/registration/whatsapp/issue':
-        return void (await routeRegistrationWhatsappIssue(req, res));
-      case '/api/v1/registration/whatsapp/verify':
-        return void (await routeRegistrationWhatsappVerify(req, res, body));
       case '/api/v1/registration/aadhaar-mobile/start':
         return void (await routeRegistrationAadhaarMobileStart(req, res));
       case '/api/v1/registration/aadhaar-mobile/complete':
@@ -1907,60 +1897,6 @@ encryptionSecret: overrides.accountEncryptionSecret ?? config.account?.encryptio
       return;
     }
     const result = registrationService.verifyEmailOtp(token, str(body, 'code'));
-    sendRegistrationResult(res, result);
-  }
-
-  async function routeRegistrationSmsIssue(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-  ): Promise<void> {
-    const token = parseRegistrationCookie(req);
-    if (!token) {
-      sendMissingRegistration(res);
-      return;
-    }
-    const result = await registrationService.issueSmsOtp(token);
-    sendRegistrationResult(res, result);
-  }
-
-  async function routeRegistrationSmsVerify(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-    body: JsonBody,
-  ): Promise<void> {
-    const token = parseRegistrationCookie(req);
-    if (!token) {
-      sendMissingRegistration(res);
-      return;
-    }
-    const result = registrationService.verifySmsOtp(token, str(body, 'code'));
-    sendRegistrationResult(res, result);
-  }
-
-  async function routeRegistrationWhatsappIssue(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-  ): Promise<void> {
-    const token = parseRegistrationCookie(req);
-    if (!token) {
-      sendMissingRegistration(res);
-      return;
-    }
-    const result = await registrationService.issueWhatsappOtp(token);
-    sendRegistrationResult(res, result);
-  }
-
-  async function routeRegistrationWhatsappVerify(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-    body: JsonBody,
-  ): Promise<void> {
-    const token = parseRegistrationCookie(req);
-    if (!token) {
-      sendMissingRegistration(res);
-      return;
-    }
-    const result = registrationService.verifyWhatsappOtp(token, str(body, 'code'));
     sendRegistrationResult(res, result);
   }
 

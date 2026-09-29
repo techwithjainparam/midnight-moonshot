@@ -7,8 +7,6 @@
 
 /** Capabilities echoed by GET /api/v1/registration/capabilities. */
 export interface RegistrationCapabilities {
-  readonly smsConfigured: boolean;
-  readonly whatsappConfigured: boolean;
   readonly emailConfigured: boolean;
   readonly aadhaarOcrConfigured: boolean;
   readonly aadhaarMobileConfigured: boolean;
@@ -25,12 +23,6 @@ export interface RegistrationStatus {
   readonly personalVerified: boolean;
   readonly aadhaarDocumentStatus: 'unverified' | 'verified';
   readonly emailVerified: boolean;
-  readonly smsOtpVerified: boolean;
-  readonly whatsappOtpVerified: boolean;
-  /** Either channel satisfies phone verification (SMS OR WhatsApp). */
-  readonly phoneVerified: boolean;
-  /** Which channel actually proved the number, when one has. */
-  readonly phoneChannel: 'sms' | 'whatsapp' | null;
   readonly aadhaarMobileLinked: boolean;
   readonly passwordSet: boolean;
   readonly photoStatus: 'unverified' | 'verified';
@@ -48,8 +40,6 @@ export type RegistrationStep =
   | 'personal'
   | 'aadhaar-document'
   | 'email'
-  | 'sms-otp'
-  | 'whatsapp-otp'
   | 'aadhaar-mobile'
   | 'password'
   | 'photo'
@@ -62,8 +52,6 @@ export const REGISTRATION_STEP_ORDER: readonly RegistrationStep[] = [
   'personal',
   'aadhaar-document',
   'email',
-  'sms-otp',
-  'whatsapp-otp',
   'aadhaar-mobile',
   'password',
   'photo',
@@ -76,8 +64,6 @@ export const REGISTRATION_STEP_LABELS: Record<RegistrationStep, string> = {
   personal: 'Personal details & Aadhaar',
   'aadhaar-document': 'Aadhaar document OCR',
   email: 'Email verification',
-  'sms-otp': 'SMS OTP',
-  'whatsapp-otp': 'WhatsApp OTP',
   'aadhaar-mobile': 'Aadhaar-mobile link',
   password: 'Password',
   photo: 'Passport photo',
@@ -118,8 +104,6 @@ export const REGISTRATION_STEP_TO_STAGE: Record<RegistrationStep, RegistrationSt
   personal: 'personal',
   'aadhaar-document': 'identity',
   email: 'identity',
-  'sms-otp': 'identity',
-  'whatsapp-otp': 'identity',
   'aadhaar-mobile': 'identity',
   password: 'security',
   photo: 'security',
@@ -137,10 +121,6 @@ export function currentRegistrationStep(status: RegistrationStatus | null): Regi
   if (!status || !status.personalVerified) return 'personal';
   if (status.aadhaarDocumentStatus !== 'verified') return 'aadhaar-document';
   if (!status.emailVerified) return 'email';
-  // Phone is EITHER-or. The citizen picks SMS or WhatsApp, so once either
-  // channel is verified there is no second phone step to satisfy. (These two
-  // steps are now completed as part of the personal stage.)
-  if (!status.phoneVerified) return status.smsOtpVerified ? 'whatsapp-otp' : 'sms-otp';
   if (!status.aadhaarMobileLinked) return 'aadhaar-mobile';
   if (!status.passwordSet) return 'password';
   if (status.photoStatus !== 'verified') return 'photo';

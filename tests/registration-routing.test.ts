@@ -76,6 +76,7 @@ function makeServerConfig(): ServerConfig {
       biometricEncryptionSecret: 'registration-routing-test-bio-secret-0123456789',
       dbPath: ':memory:',
       smsConfigured: false,
+      // Account/login still supports WhatsApp OTP; only REGISTRATION dropped it.
       whatsappConfigured: false,
       googleConfigured: false,
       sessionTtlMs: 24 * 60 * 60 * 1000,
@@ -171,8 +172,6 @@ test('[registration/capabilities] honestly reports provider state (all unconfigu
     const caps = await getJson(`${base}/api/v1/registration/capabilities`);
     assert.equal(caps.status, 200);
     assert.deepEqual(caps.body.capabilities, {
-      smsConfigured: false,
-      whatsappConfigured: false,
       emailConfigured: true,
       aadhaarOcrConfigured: false,
       aadhaarMobileConfigured: false,
@@ -180,6 +179,8 @@ test('[registration/capabilities] honestly reports provider state (all unconfigu
       geocodingConfigured: true,
       passwordRecoveryConfigured: true,
     });
+    // SMS is no longer a registration capability at all.
+    assert.equal('smsConfigured' in caps.body.capabilities, false);
   } finally {
     await stack.close();
   }
@@ -253,8 +254,6 @@ test('[registration/gating] every stepper step returns 401 without a session', a
       { path: '/api/v1/registration/personal', body: { fullName: 'A' } },
       { path: '/api/v1/registration/email', body: { email: 'a@b.co' } },
       { path: '/api/v1/registration/email/verify', body: { code: '123456' } },
-      { path: '/api/v1/registration/sms/verify', body: { code: '123456' } },
-      { path: '/api/v1/registration/whatsapp/verify', body: { code: '123456' } },
       { path: '/api/v1/registration/aadhaar-mobile/complete', body: { sessionId: 'x', code: '123456' } },
       { path: '/api/v1/registration/password', body: { password: 'X', confirm: 'X' } },
       { path: '/api/v1/registration/finalize' },
@@ -617,17 +616,6 @@ function capturingWhatsApp(): { provider: WhatsAppProvider; sent: Array<{ to: st
   };
 }
 
-const UNCONFIGURED_SMS: SmsProvider = {
-  name: 'none',
-  configured: false,
-  send: async () => ({ ok: false, reason: 'unconfigured' as const }),
-};
-const UNCONFIGURED_WA: WhatsAppProvider = {
-  name: 'none',
-  configured: false,
-  send: async () => ({ ok: false, reason: 'unconfigured' as const }),
-};
-
 const GOOD_PERSONAL = {
   firstName: 'Asha',
   middleName: 'R',
@@ -642,11 +630,36 @@ const GOOD_PERSONAL = {
   mobile: '9876543210',
 } as const;
 
-test('[personal/step] phase 1 stores details but keeps the step open until the phone is proven', async () => {
-  const stack = await listenVerificationServer(makeServerConfig(), {
-    accountSmsProvider: UNCONFIGURED_SMS,
-    accountWhatsAppProvider: UNCONFIGURED_WA,
+const GOOD_EMAIL = 'citizen@example.com';
+
+/** Drive a session to "personal details stored". */
+async function storePersonal(base: string, sess: string): Promise<void> {
+  await getJson(`${base}/api/v1/registration/personal`, {
+    method: 'POST',
+    headers: { Cookie: `priestate_reg_sid=${sess}` },
+    json: { ...GOOD_PERSONAL },
   });
+}
+
+/** Store details, request the email OTP and return the delivered code. */
+async function sendEmailOtp(
+  base: string,
+  sess: string,
+  mailer: CaptureMailer,
+): Promise<string> {
+  const issue = await getJson(`${base}/api/v1/registration/email`, {
+    method: 'POST',
+    headers: { Cookie: `priestate_reg_sid=${sess}` },
+    json: { email: GOOD_EMAIL },
+  });
+  assert.equal(issue.status, 200, JSON.stringify(issue.body));
+  const code = mailer.lastCode();
+  assert.ok(code, 'a real verification code was delivered by email');
+  return code;
+}
+
+test('[personal/step] phase 1 stores details but keeps the step open until the citizen continues', async () => {
+  const stack = await listenVerificationServer(makeServerConfig(), {});
   try {
     const base = `http://127.0.0.1:${stack.port}`;
     const sess = await beginSession(base);
@@ -656,9 +669,8 @@ test('[personal/step] phase 1 stores details but keeps the step open until the p
       json: { ...GOOD_PERSONAL },
     });
     assert.equal(resp.status, 200, JSON.stringify(resp.body));
-    // The PII landed, but the STEP is not complete: the phone is unproven.
+    // The PII landed, but the STEP is not complete until the citizen continues.
     assert.equal(resp.body.personalVerified, false);
-    assert.equal(resp.body.phoneVerified, false);
     // The number is echoed back ONLY masked — never in the clear.
     assert.equal(resp.body.maskedMobile, '+91••••10');
     assert.equal(resp.body.maskedAadhaar, '•••• 9012');
@@ -667,511 +679,169 @@ test('[personal/step] phase 1 stores details but keeps the step open until the p
   }
 });
 
-test('[personal/step] Continue is refused until the phone is verified (fails closed)', async () => {
-  const stack = await listenVerificationServer(makeServerConfig(), {
-    accountSmsProvider: UNCONFIGURED_SMS,
-    accountWhatsAppProvider: UNCONFIGURED_WA,
-  });
+test('[email] a wrong email code is rejected and never advances the email gate', async () => {
+  const mailer = new CaptureMailer();
+  const stack = await listenVerificationServer(makeServerConfig(), { mailer });
   try {
     const base = `http://127.0.0.1:${stack.port}`;
     const sess = await beginSession(base);
-    await getJson(`${base}/api/v1/registration/personal`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: { ...GOOD_PERSONAL },
-    });
-    const resp = await getJson(`${base}/api/v1/registration/personal/complete`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: {},
-    });
-    assert.equal(resp.status, 409, 'completing without a proven phone must fail closed');
-    assert.equal(resp.body.ok, false);
-    assert.match(String(resp.body.message), /SMS or WhatsApp/i);
-  } finally {
-    await stack.close();
-  }
-});
+    await storePersonal(base, sess);
+    const real = await sendEmailOtp(base, sess, mailer);
+    assert.equal(mailer.sent[0]?.to, GOOD_EMAIL, 'the code went to the submitted address');
 
-test('[personal/step] SMS alone satisfies the phone gate and unlocks Continue', async () => {
-  const sms = capturingSms();
-  const stack = await listenVerificationServer(makeServerConfig(), {
-    accountSmsProvider: sms.provider,
-    accountWhatsAppProvider: UNCONFIGURED_WA,
-  });
-  try {
-    const base = `http://127.0.0.1:${stack.port}`;
-    const sess = await beginSession(base);
-    await getJson(`${base}/api/v1/registration/personal`, {
+    // A wrong code must be refused, even when well-formed.
+    const wrong = await getJson(`${base}/api/v1/registration/email/verify`, {
       method: 'POST',
       headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: { ...GOOD_PERSONAL },
+      json: { code: real === '000000' ? '111111' : '000000' },
     });
-    const issue = await getJson(`${base}/api/v1/registration/sms/issue`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: {},
-    });
-    assert.equal(issue.status, 200);
-    assert.equal(sms.sent.length, 1);
-    assert.equal(sms.sent[0]?.to, '+919876543210', 'the code went to the stored E.164 number');
+    assert.equal(wrong.status, 400, 'a wrong email code must not verify');
+    assert.equal(wrong.body.ok, false);
 
-    const verify = await getJson(`${base}/api/v1/registration/sms/verify`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: { code: sms.sent[0]?.code },
-    });
-    assert.equal(verify.status, 200);
-    assert.equal(verify.body.smsOtpVerified, true);
-    // The verify route answers with just its own result, so the derived
-    // either-or state is read from the authoritative status projection.
     const after = await getJson(`${base}/api/v1/registration/status`, {
       headers: { Cookie: `priestate_reg_sid=${sess}` },
     });
-    const s = after.body.session as {
-      phoneVerified: boolean;
-      phoneChannel: string | null;
-      personalVerified: boolean;
-      whatsappOtpVerified: boolean;
-    };
-    assert.equal(s.whatsappOtpVerified, false, 'WhatsApp was never used');
-    assert.equal(s.phoneVerified, true, 'EITHER channel is sufficient');
-    assert.equal(s.phoneChannel, 'sms');
-    // A verified phone proves the NUMBER. It must not, by itself, complete the
-    // step — the citizen still owes an explicit Continue.
-    assert.equal(s.personalVerified, false, 'phone proof alone must not complete the step');
-
-    const done = await getJson(`${base}/api/v1/registration/personal/complete`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: {},
-    });
-    assert.equal(done.status, 200, JSON.stringify(done.body));
-    assert.equal(done.body.personalVerified, true, 'Continue is what completes the step');
-
-    // Durable: the completion survives a fresh read of the status projection.
-    const reread = await getJson(`${base}/api/v1/registration/status`, {
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-    });
-    assert.equal(
-      (reread.body.session as { personalVerified?: boolean } | null)?.personalVerified,
-      true,
-      'completion is persisted',
-    );
+    const st = after.body.session as { emailVerified: boolean };
+    assert.equal(st.emailVerified, false, 'a wrong code must not set the flag');
   } finally {
     await stack.close();
   }
 });
 
-test('[personal/step] WhatsApp alone equally satisfies the phone gate', async () => {
-  const wa = capturingWhatsApp();
+test('[email] a verified email code is single-use and cannot be replayed', async () => {
+  const mailer = new CaptureMailer();
+  const stack = await listenVerificationServer(makeServerConfig(), { mailer });
+  try {
+    const base = `http://127.0.0.1:${stack.port}`;
+    const sess = await beginSession(base);
+    await storePersonal(base, sess);
+    const code = await sendEmailOtp(base, sess, mailer);
+
+    const first = await getJson(`${base}/api/v1/registration/email/verify`, {
+      method: 'POST',
+      headers: { Cookie: `priestate_reg_sid=${sess}` },
+      json: { code },
+    });
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.equal(first.body.emailVerified, true);
+
+    // Replaying the very same code must not re-verify anything.
+    const replay = await getJson(`${base}/api/v1/registration/email/verify`, {
+      method: 'POST',
+      headers: { Cookie: `priestate_reg_sid=${sess}` },
+      json: { code },
+    });
+    assert.notEqual(replay.status, 200, 'a consumed code must never verify twice');
+    assert.equal(replay.body.ok, false);
+  } finally {
+    await stack.close();
+  }
+});
+
+test('[email] the code is never returned by the API and never echoed in the response', async () => {
+  const mailer = new CaptureMailer();
+  const stack = await listenVerificationServer(makeServerConfig(), { mailer });
+  try {
+    const base = `http://127.0.0.1:${stack.port}`;
+    const sess = await beginSession(base);
+    await storePersonal(base, sess);
+    const code = await sendEmailOtp(base, sess, mailer);
+
+    // The issue response must leak neither the code nor the raw address.
+    const issue = await getJson(`${base}/api/v1/registration/email`, {
+      method: 'POST',
+      headers: { Cookie: `priestate_reg_sid=${sess}` },
+      json: { email: GOOD_EMAIL },
+    });
+    assert.equal(issue.status, 409, 'the resend is refused by the cooldown');
+    assert.equal(JSON.stringify(issue.body).includes(code), false, 'no code in a response body');
+
+    const status = await getJson(`${base}/api/v1/registration/status`, {
+      headers: { Cookie: `priestate_reg_sid=${sess}` },
+    });
+    assert.equal(JSON.stringify(status.body).includes(code), false, 'no code in the status projection');
+    // The address itself is only ever echoed masked.
+    assert.equal((status.body.session as { maskedEmail: string }).maskedEmail, 'c••••n@example.com');
+  } finally {
+    await stack.close();
+  }
+});
+
+test('[email] an email delivery failure fails closed and mints no verifiable code', async () => {
   const stack = await listenVerificationServer(makeServerConfig(), {
-    accountSmsProvider: UNCONFIGURED_SMS,
+    // Configured transport whose SMTP send always rejects.
+    mailer: {
+      async send(): Promise<void> {
+        throw new Error('smtp unavailable');
+      },
+    },
+  });
+  try {
+    const base = `http://127.0.0.1:${stack.port}`;
+    const sess = await beginSession(base);
+    await storePersonal(base, sess);
+    const issue = await getJson(`${base}/api/v1/registration/email`, {
+      method: 'POST',
+      headers: { Cookie: `priestate_reg_sid=${sess}` },
+      json: { email: GOOD_EMAIL },
+    });
+    assert.equal(issue.status, 502, 'a rejected delivery must surface as a failure');
+    assert.equal(issue.body.ok, false);
+
+    // No code was ever committed, so a guessed code has nothing to match and
+    // the request fails closed rather than verifying anything.
+    const guess = await getJson(`${base}/api/v1/registration/email/verify`, {
+      method: 'POST',
+      headers: { Cookie: `priestate_reg_sid=${sess}` },
+      json: { code: '123456' },
+    });
+    assert.notEqual(guess.status, 200);
+    assert.equal(guess.body.ok, false);
+    assert.equal(guess.body.emailVerified, undefined, 'no verification is ever claimed');
+
+    const after = await getJson(`${base}/api/v1/registration/status`, {
+      headers: { Cookie: `priestate_reg_sid=${sess}` },
+    });
+    const st = after.body.session as { emailVerified: boolean };
+    assert.equal(st.emailVerified, false, 'a failed delivery must not create a usable OTP');
+  } finally {
+    await stack.close();
+  }
+});
+
+test('[personal/step] SMS and WhatsApp are NOT registration factors: their routes are gone', async () => {
+  const wa = capturingWhatsApp();
+  const sms = capturingSms();
+  const stack = await listenVerificationServer(makeServerConfig(), {
+    accountSmsProvider: sms.provider,
     accountWhatsAppProvider: wa.provider,
   });
   try {
     const base = `http://127.0.0.1:${stack.port}`;
     const sess = await beginSession(base);
-    await getJson(`${base}/api/v1/registration/personal`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: { ...GOOD_PERSONAL },
-    });
-    const issue = await getJson(`${base}/api/v1/registration/whatsapp/issue`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: {},
-    });
-    assert.equal(issue.status, 200);
-    const verify = await getJson(`${base}/api/v1/registration/whatsapp/verify`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: { code: wa.sent[0]?.code },
-    });
-    assert.equal(verify.status, 200);
-    assert.equal(verify.body.whatsappOtpVerified, true);
+    await storePersonal(base, sess);
+
+    // Neither messaging channel is a registration route any more.
+    for (const path of ['whatsapp/issue', 'whatsapp/verify', 'sms/issue', 'sms/verify']) {
+      const gone = await getJson(`${base}/api/v1/registration/${path}`, {
+        method: 'POST',
+        headers: { Cookie: `priestate_reg_sid=${sess}` },
+        json: { code: '123456' },
+      });
+      assert.equal(gone.status, 404, `${path} must not be a registration route`);
+    }
+    assert.equal(wa.sent.length, 0, 'no WhatsApp code may be delivered for registration');
+    assert.equal(sms.sent.length, 0, 'no SMS code may be delivered for registration');
+
+    // The status projection no longer carries any phone-verification channel.
     const after = await getJson(`${base}/api/v1/registration/status`, {
       headers: { Cookie: `priestate_reg_sid=${sess}` },
     });
-    const s = after.body.session as {
-      smsOtpVerified: boolean;
-      phoneVerified: boolean;
-      phoneChannel: string | null;
-      personalVerified: boolean;
-    };
-    assert.equal(s.smsOtpVerified, false);
-    assert.equal(s.phoneVerified, true, 'EITHER channel is sufficient');
-    assert.equal(s.phoneChannel, 'whatsapp');
-    // Same rule as the SMS path: proof of the number is not proof of consent
-    // to advance, so Continue still has to be pressed.
-    assert.equal(s.personalVerified, false);
-    const done = await getJson(`${base}/api/v1/registration/personal/complete`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: {},
-    });
-    assert.equal(done.status, 200, JSON.stringify(done.body));
-    assert.equal(done.body.personalVerified, true);
-  } finally {
-    await stack.close();
-  }
-});
-
-test('[personal/step] editing the details invalidates an earlier phone proof', async () => {
-  const sms = capturingSms();
-  const stack = await listenVerificationServer(makeServerConfig(), {
-    accountSmsProvider: sms.provider,
-    accountWhatsAppProvider: UNCONFIGURED_WA,
-  });
-  try {
-    const base = `http://127.0.0.1:${stack.port}`;
-    const sess = await beginSession(base);
-    await getJson(`${base}/api/v1/registration/personal`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: { ...GOOD_PERSONAL },
-    });
-    await getJson(`${base}/api/v1/registration/sms/issue`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: {},
-    });
-    await getJson(`${base}/api/v1/registration/sms/verify`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: { code: sms.sent[0]?.code },
-    });
-    const before = await getJson(`${base}/api/v1/registration/status`, {
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-    });
-    assert.equal((before.body.session as { phoneVerified?: boolean } | null)?.phoneVerified, true);
-
-    // The citizen edits the address → the number may no longer be theirs, so
-    // both channels must be proven again.
-    const edited = await getJson(`${base}/api/v1/registration/personal`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: { ...GOOD_PERSONAL, addressOnAadhaar: '99 Church Street, Bangalore' },
-    });
-    assert.equal(edited.status, 200);
-    assert.equal(edited.body.phoneVerified, false, 'the earlier proof no longer counts');
-    assert.equal(edited.body.personalVerified, false);
-  } finally {
-    await stack.close();
-  }
-});
-
-test('[personal/validation] a malformed PAN is rejected', async () => {
-  const stack = await listenVerificationServer(makeServerConfig(), {});
-  try {
-    const base = `http://127.0.0.1:${stack.port}`;
-    const sess = await beginSession(base);
-    const resp = await getJson(`${base}/api/v1/registration/personal`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: { ...GOOD_PERSONAL, panNumber: 'NOTAPAN' },
-    });
-    assert.equal(resp.status, 400);
-    assert.match(JSON.stringify(resp.body.issues), /PAN/i);
-  } finally {
-    await stack.close();
-  }
-});
-
-test('[personal/validation] a missing first/last name is rejected, a missing middle name is fine', async () => {
-  const stack = await listenVerificationServer(makeServerConfig(), {});
-  try {
-    const base = `http://127.0.0.1:${stack.port}`;
-    const sessA = await beginSession(base);
-    const noName = await getJson(`${base}/api/v1/registration/personal`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sessA}` },
-      json: { ...GOOD_PERSONAL, firstName: '', lastName: '' },
-    });
-    assert.equal(noName.status, 400);
-    assert.match(JSON.stringify(noName.body.issues), /first and last name/i);
-
-    const sessB = await beginSession(base);
-    const noMiddle = await getJson(`${base}/api/v1/registration/personal`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sessB}` },
-      json: { ...GOOD_PERSONAL, middleName: '' },
-    });
-    assert.equal(noMiddle.status, 200, 'middle name is optional');
-  } finally {
-    await stack.close();
-  }
-});
-
-test('[personal/validation] a foreign number is stored as E.164, never remapped to +91', async () => {
-  const stack = await listenVerificationServer(makeServerConfig(), {});
-  try {
-    const base = `http://127.0.0.1:${stack.port}`;
-    const sess = await beginSession(base);
-    // A well-formed UK mobile is accepted and kept in its own country.
-    const uk = await getJson(`${base}/api/v1/registration/personal`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: { ...GOOD_PERSONAL, mobileCountryCode: '+44', mobile: '7400123456' },
-    });
-    assert.equal(uk.status, 200, JSON.stringify(uk.body));
-    assert.equal(uk.body.maskedMobile, '+44••••56', 'full calling code kept, not truncated to +91');
-
-    // A number that does not fit the SELECTED country is refused rather than
-    // being coerced into another country's numbering plan.
-    const sessB = await beginSession(base);
-    const mismatched = await getJson(`${base}/api/v1/registration/personal`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sessB}` },
-      json: { ...GOOD_PERSONAL, mobileCountryCode: '+44', mobile: '1234567890' },
-    });
-    assert.equal(mismatched.status, 400, 'not a valid UK number');
-
-    // The PIN code and state remain India-only even for a foreign number: the
-    // identity model was deliberately NOT widened.
-    const sessC = await beginSession(base);
-    const badPin = await getJson(`${base}/api/v1/registration/personal`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sessC}` },
-      json: { ...GOOD_PERSONAL, mobileCountryCode: '+44', mobile: '7400123456', pincode: 'SW1A 1AA' },
-    });
-    assert.equal(badPin.status, 400, 'a UK postcode is not a valid Indian PIN');
-  } finally {
-    await stack.close();
-  }
-});
-
-test('[personal/validation] an unknown country code is refused, never guessed at', async () => {
-  const stack = await listenVerificationServer(makeServerConfig(), {});
-  try {
-    const base = `http://127.0.0.1:${stack.port}`;
-    const sess = await beginSession(base);
-    const resp = await getJson(`${base}/api/v1/registration/personal`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: { ...GOOD_PERSONAL, mobileCountryCode: '+999', mobile: '7400123456' },
-    });
-    assert.equal(resp.status, 400);
-  } finally {
-    await stack.close();
-  }
-});
-
-test('[personal/validation] an impossible or future date of birth is rejected', async () => {
-  const stack = await listenVerificationServer(makeServerConfig(), {});
-  try {
-    const base = `http://127.0.0.1:${stack.port}`;
-    for (const dob of ['2090-01-01', '2024-02-31', '1899-01-01']) {
-      const sess = await beginSession(base);
-      const resp = await getJson(`${base}/api/v1/registration/personal`, {
-        method: 'POST',
-        headers: { Cookie: `priestate_reg_sid=${sess}` },
-        json: { ...GOOD_PERSONAL, dateOfBirth: dob },
-      });
-      assert.equal(resp.status, 400, `${dob} must be rejected`);
-      assert.match(JSON.stringify(resp.body.issues), /date of birth/i);
-    }
-  } finally {
-    await stack.close();
-  }
-});
-
-test('[personal/privacy] a guessed OTP is never accepted and no provider means no success', async () => {
-  const stack = await listenVerificationServer(makeServerConfig(), {
-    accountSmsProvider: UNCONFIGURED_SMS,
-    accountWhatsAppProvider: UNCONFIGURED_WA,
-  });
-  try {
-    const base = `http://127.0.0.1:${stack.port}`;
-    const sess = await beginSession(base);
-    await getJson(`${base}/api/v1/registration/personal`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: { ...GOOD_PERSONAL },
-    });
-    // Issuing must fail closed when no gateway is configured.
-    for (const path of ['sms', 'whatsapp']) {
-      const issue = await getJson(`${base}/api/v1/registration/${path}/issue`, {
-        method: 'POST',
-        headers: { Cookie: `priestate_reg_sid=${sess}` },
-        json: {},
-      });
-      assert.equal(issue.status, 503, `${path} must fail closed when unconfigured`);
-    }
-    // A hardcoded code must NOT verify.
-    const guess = await getJson(`${base}/api/v1/registration/sms/verify`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: { code: '123456' },
-    });
-    assert.notEqual(guess.status, 200, 'a guessed code must never verify');
-    assert.equal(guess.body.smsOtpVerified, undefined);
-  } finally {
-    await stack.close();
-  }
-});
-
-test('[personal/geocode] a coordinate resolves to an address and the coords are never echoed back', async () => {
-  const fake = await startFakeGeocoder(() => ({
-    json: {
-      display_name: '12 MG Road, Indiranagar, Bengaluru, Karnataka 560038, India',
-      address: { district: 'Bengaluru', state: 'Karnataka', postcode: '560038', country: 'India' },
-    },
-  }));
-  const stack = await listenVerificationServer(makeServerConfig(), {
-    registrationGeocodingProvider: new NominatimReverseGeocoder({ baseUrl: fake.url }),
-  });
-  try {
-    const base = `http://127.0.0.1:${stack.port}`;
-    const sess = await beginSession(base);
-    const resp = await getJson(`${base}/api/v1/registration/personal/reverse-geocode`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: { lat: 12.9716, lng: 77.5946 },
-    });
-    assert.equal(resp.status, 200, JSON.stringify(resp.body));
-    assert.equal(resp.body.address, '12 MG Road, Indiranagar, Bengaluru, Karnataka 560038, India');
-    assert.equal(resp.body.city, 'Bengaluru');
-    assert.equal(resp.body.state, 'Karnataka');
-    assert.equal(resp.body.pincode, '560038');
-    // Raw coordinates are NOT returned to the browser.
-    assert.equal(resp.body.lat, undefined);
-    assert.equal(resp.body.lng, undefined);
-    assert.equal(resp.body.coords, undefined);
-  } finally {
-    await stack.close();
-    await fake.close();
-  }
-});
-
-test('[personal/geocode] an out-of-range coordinate is rejected without calling the upstream', async () => {
-  const fake = await startFakeGeocoder(() => ({ json: { display_name: 'never' } }));
-  const stack = await listenVerificationServer(makeServerConfig(), {
-    registrationGeocodingProvider: new NominatimReverseGeocoder({ baseUrl: fake.url }),
-  });
-  try {
-    const base = `http://127.0.0.1:${stack.port}`;
-    const sess = await beginSession(base);
-    const resp = await getJson(`${base}/api/v1/registration/personal/reverse-geocode`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: { lat: 999, lng: 999 },
-    });
-    assert.equal(resp.status, 400);
-    assert.equal(fake.calls.length, 0, 'an invalid coordinate never reaches the provider');
-  } finally {
-    await stack.close();
-    await fake.close();
-  }
-});
-
-test('[personal/geocode] an unreachable geocoder fails closed and manual entry is offered', async () => {
-  const fake = await startFakeGeocoder(() => ({ status: 500, json: { error: 'boom' } }));
-  const stack = await listenVerificationServer(makeServerConfig(), {
-    registrationGeocodingProvider: new NominatimReverseGeocoder({ baseUrl: fake.url }),
-  });
-  try {
-    const base = `http://127.0.0.1:${stack.port}`;
-    const sess = await beginSession(base);
-    const resp = await getJson(`${base}/api/v1/registration/personal/reverse-geocode`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: { lat: 12.97, lng: 77.59 },
-    });
-    assert.equal(resp.status, 502, 'a geocoder failure is reported, never faked');
-    assert.equal(resp.body.ok, false);
-    assert.match(String(resp.body.message), /manually/i, 'the citizen is told to type it instead');
-  } finally {
-    await stack.close();
-    await fake.close();
-  }
-});
-
-test('[personal/auth] the personal routes require an active session', async () => {
-  const stack = await listenVerificationServer(makeServerConfig(), {});
-  try {
-    const base = `http://127.0.0.1:${stack.port}`;
-    for (const path of [
-      '/api/v1/registration/personal',
-      '/api/v1/registration/personal/complete',
-      '/api/v1/registration/personal/reverse-geocode',
-    ]) {
-      const resp = await getJson(`${base}${path}`, { method: 'POST', json: { lat: 1, lng: 1 } });
-      assert.equal(resp.status, 401, `${path} must require a session`);
-    }
-  } finally {
-    await stack.close();
-  }
-});
-
-// ═══════════════════════════════════════════════════════════════════
-// PERSONAL STEP — completion gate, state allowlist, list drift guard
-// ═══════════════════════════════════════════════════════════════════
-
-test('[personal/step] Continue is refused until the phone is actually proven', async () => {
-  const stack = await listenVerificationServer(makeServerConfig(), {});
-  try {
-    const base = `http://127.0.0.1:${stack.port}`;
-    const sess = await beginSession(base);
-    await getJson(`${base}/api/v1/registration/personal`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: { ...GOOD_PERSONAL },
-    });
-    // Details are stored, so a bare Continue must fail closed rather than
-    // trusting the client's button state.
-    const early = await getJson(`${base}/api/v1/registration/personal/complete`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: {},
-    });
-    assert.equal(early.status, 409);
-    assert.match(JSON.stringify(early.body), /SMS or WhatsApp/i);
-
-    const after = await getJson(`${base}/api/v1/registration/status`, {
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-    });
-    assert.equal((after.body.session as { personalVerified?: boolean } | null)?.personalVerified, false);
-  } finally {
-    await stack.close();
-  }
-});
-
-test('[personal/step] editing the details revokes a completed Continue', async () => {
-  const sms = capturingSms();
-  const stack = await listenVerificationServer(makeServerConfig(), { accountSmsProvider: sms.provider });
-  try {
-    const base = `http://127.0.0.1:${stack.port}`;
-    const sess = await beginSession(base);
-    await getJson(`${base}/api/v1/registration/personal`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: { ...GOOD_PERSONAL },
-    });
-    await getJson(`${base}/api/v1/registration/sms/issue`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: {},
-    });
-    await getJson(`${base}/api/v1/registration/sms/verify`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: { code: sms.sent[0]?.code },
-    });
-    const done = await getJson(`${base}/api/v1/registration/personal/complete`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: {},
-    });
-    assert.equal(done.body.personalVerified, true);
-
-    // Changing the details must send the citizen back through verification.
-    const edited = await getJson(`${base}/api/v1/registration/personal`, {
-      method: 'POST',
-      headers: { Cookie: `priestate_reg_sid=${sess}` },
-      json: { ...GOOD_PERSONAL, addressOnAadhaar: '5 MG Road, Bengaluru' },
-    });
-    assert.equal(edited.body.personalVerified, false, 'Continue was revoked by the edit');
+    const s = after.body.session as Record<string, unknown>;
+    assert.equal('smsOtpVerified' in s, false, 'no SMS flag is exposed to the client');
+    assert.equal('phoneVerified' in s, false, 'no phone gate is exposed to the client');
+    assert.equal('phoneChannel' in s, false, 'no phone channel is exposed to the client');
+    assert.equal(s.emailVerified, false, 'email is the verification gate');
   } finally {
     await stack.close();
   }

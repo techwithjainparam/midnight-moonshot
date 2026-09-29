@@ -10,7 +10,7 @@
 //   * personal/profile PII — kept as an AES-256-GCM ciphertext blob, masked
 //     display fragments in the clear,
 //   * Aadhaar document OCR extraction — separate ciphertext blob,
-//   * email / SMS / WhatsApp / Aadhaar-mobile verification — discrete booleans
+//   * email / Aadhaar-mobile verification — discrete booleans
 //     and timestamps set by the SERVER only,
 //   * password — ONLY a salted scrypt hash (never the plaintext),
 //   * photo/liveness/location — verification status + timestamps; the server
@@ -27,10 +27,9 @@ export interface RegistrationSession {
   /** Encrypted personal profile { fullName, aadhaarNumber, … , email }. */
   readonly personalPiiCipherText: string | null;
   /**
-   * When the citizen explicitly pressed Continue on the personal step. Kept
-   * separate from the SMS/WhatsApp flags on purpose: verifying the phone only
-   * proves the number, so it must not silently advance the stepper. Editing the
-   * details again clears this.
+   * When the citizen explicitly pressed Continue on the personal step.
+   * Kept as its own durable flag so a client cannot simply stop asking and
+   * keep the advance. Editing the details again clears this.
    */
   readonly personalCompletedAt: number | null;
   readonly maskedMobile: string | null;
@@ -43,8 +42,6 @@ export interface RegistrationSession {
   readonly emailVerifiedAt: number | null;
   readonly smsOtpVerified: boolean;
   readonly smsOtpVerifiedAt: number | null;
-  readonly whatsappOtpVerified: boolean;
-  readonly whatsappOtpVerifiedAt: number | null;
   readonly aadhaarMobileLinked: boolean;
   readonly aadhaarMobileLinkedAt: number | null;
   readonly passwordHash: string | null;
@@ -71,12 +68,6 @@ export interface RegistrationStatus {
   readonly personalVerified: boolean;
   readonly aadhaarDocumentStatus: 'unverified' | 'verified';
   readonly emailVerified: boolean;
-  readonly smsOtpVerified: boolean;
-  readonly whatsappOtpVerified: boolean;
-  /** Either channel satisfies phone verification (SMS OR WhatsApp). */
-  readonly phoneVerified: boolean;
-  /** Which channel actually proved the number, when one has. */
-  readonly phoneChannel: 'sms' | 'whatsapp' | null;
   readonly aadhaarMobileLinked: boolean;
   readonly passwordSet: boolean;
   readonly photoStatus: 'unverified' | 'verified';
@@ -96,25 +87,18 @@ export function toRegistrationStatus(
 ): RegistrationStatus | null {
   if (!session) return null;
   // `personalVerified` is the stepper's "personal step is done" signal, and it
-  // needs ALL THREE of:
-  //   1. the encrypted PII actually stored,
-  //   2. the captured phone number proven over a real channel (SMS or
-  //      WhatsApp — never both), and
-  //   3. the citizen's own explicit Continue.
-  // Requiring (3) keeps the advance server-side rather than letting a verified
-  // OTP silently jump the stepper past the review the citizen still owes.
-  const phoneVerified = session.smsOtpVerified || session.whatsappOtpVerified;
+  // needs BOTH of:
+  //   1. the encrypted PII actually stored, and
+  //   2. the citizen's own explicit Continue.
+  // Requiring (2) keeps the advance server-side rather than letting a client
+  // silently jump the stepper past the review the citizen still owes.
   return {
     walletAddress: session.walletAddress,
     active: session.finalizedAt === null,
     personalVerified:
-      session.personalPiiCipherText !== null && phoneVerified && session.personalCompletedAt !== null,
+      session.personalPiiCipherText !== null && session.personalCompletedAt !== null,
     aadhaarDocumentStatus: session.aadhaarDocumentStatus,
     emailVerified: session.emailVerified,
-    smsOtpVerified: session.smsOtpVerified,
-    whatsappOtpVerified: session.whatsappOtpVerified,
-    phoneVerified,
-    phoneChannel: session.smsOtpVerified ? 'sms' : session.whatsappOtpVerified ? 'whatsapp' : null,
     aadhaarMobileLinked: session.aadhaarMobileLinked,
     passwordSet: session.passwordHash !== null,
     photoStatus: session.photoStatus,
@@ -154,8 +138,6 @@ interface Row {
   email_verified_at: number | null;
   sms_otp_verified: number;
   sms_otp_verified_at: number | null;
-  whatsapp_otp_verified: number;
-  whatsapp_otp_verified_at: number | null;
   aadhaar_mobile_linked: number;
   aadhaar_mobile_linked_at: number | null;
   password_hash: string | null;
@@ -186,8 +168,6 @@ function rowToSession(r: Row): RegistrationSession {
     emailVerifiedAt: r.email_verified_at ?? null,
     smsOtpVerified: r.sms_otp_verified === 1,
     smsOtpVerifiedAt: r.sms_otp_verified_at ?? null,
-    whatsappOtpVerified: r.whatsapp_otp_verified === 1,
-    whatsappOtpVerifiedAt: r.whatsapp_otp_verified_at ?? null,
     aadhaarMobileLinked: r.aadhaar_mobile_linked === 1,
     aadhaarMobileLinkedAt: r.aadhaar_mobile_linked_at ?? null,
     passwordHash: r.password_hash ?? null,
@@ -219,8 +199,6 @@ function sessionToRow(s: RegistrationSession): Row {
     email_verified_at: s.emailVerifiedAt,
     sms_otp_verified: s.smsOtpVerified ? 1 : 0,
     sms_otp_verified_at: s.smsOtpVerifiedAt,
-    whatsapp_otp_verified: s.whatsappOtpVerified ? 1 : 0,
-    whatsapp_otp_verified_at: s.whatsappOtpVerifiedAt,
     aadhaar_mobile_linked: s.aadhaarMobileLinked ? 1 : 0,
     aadhaar_mobile_linked_at: s.aadhaarMobileLinkedAt,
     password_hash: s.passwordHash,
@@ -249,8 +227,6 @@ const RECORD_FIELD: Record<string, keyof RegistrationSession> = {
   email_verified_at: 'emailVerifiedAt',
   sms_otp_verified: 'smsOtpVerified',
   sms_otp_verified_at: 'smsOtpVerifiedAt',
-  whatsapp_otp_verified: 'whatsappOtpVerified',
-  whatsapp_otp_verified_at: 'whatsappOtpVerifiedAt',
   aadhaar_mobile_linked: 'aadhaarMobileLinked',
   aadhaar_mobile_linked_at: 'aadhaarMobileLinkedAt',
   password_hash: 'passwordHash',
@@ -277,22 +253,22 @@ export class SqliteRegistrationSessionStore implements RegistrationSessionStore 
       .prepare(
         `INSERT INTO registration_sessions
            (session_token, wallet_address, personal_pii_ciphertext, masked_mobile,
-            masked_aadhaar, aadhaar_ocr_ciphertext, aadhaar_document_status,
-            aadhaar_document_extracted_at, email_verified, email_verified_at,
-            sms_otp_verified, sms_otp_verified_at, whatsapp_otp_verified,
-            whatsapp_otp_verified_at, aadhaar_mobile_linked, aadhaar_mobile_linked_at,
-            password_hash, password_salt, photo_status, photo_content_hash,
-            liveness_passed, liveness_passed_at, location_accepted,
-            location_accepted_at, finalized_at, created_at, expires_at)
+             masked_aadhaar, aadhaar_ocr_ciphertext, aadhaar_document_status,
+             aadhaar_document_extracted_at, email_verified, email_verified_at,
+             sms_otp_verified, sms_otp_verified_at,
+             aadhaar_mobile_linked, aadhaar_mobile_linked_at,
+             password_hash, password_salt, photo_status, photo_content_hash,
+             liveness_passed, liveness_passed_at, location_accepted,
+             location_accepted_at, finalized_at, created_at, expires_at)
          VALUES
            (@session_token, @wallet_address, @personal_pii_ciphertext, @masked_mobile,
-            @masked_aadhaar, @aadhaar_ocr_ciphertext, @aadhaar_document_status,
-            @aadhaar_document_extracted_at, @email_verified, @email_verified_at,
-            @sms_otp_verified, @sms_otp_verified_at, @whatsapp_otp_verified,
-            @whatsapp_otp_verified_at, @aadhaar_mobile_linked, @aadhaar_mobile_linked_at,
-            @password_hash, @password_salt, @photo_status, @photo_content_hash,
-            @liveness_passed, @liveness_passed_at, @location_accepted,
-            @location_accepted_at, @finalized_at, @created_at, @expires_at)`,
+             @masked_aadhaar, @aadhaar_ocr_ciphertext, @aadhaar_document_status,
+             @aadhaar_document_extracted_at, @email_verified, @email_verified_at,
+             @sms_otp_verified, @sms_otp_verified_at,
+             @aadhaar_mobile_linked, @aadhaar_mobile_linked_at,
+             @password_hash, @password_salt, @photo_status, @photo_content_hash,
+             @liveness_passed, @liveness_passed_at, @location_accepted,
+             @location_accepted_at, @finalized_at, @created_at, @expires_at)`,
       )
       .run(row);
   }

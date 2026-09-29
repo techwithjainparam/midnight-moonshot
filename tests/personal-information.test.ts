@@ -54,18 +54,17 @@ function validValues(overrides: Partial<PersonalFormValues> = {}): PersonalFormV
   };
 }
 
-/** A server status with the phone already proven over `channel`. */
-function statusWithPhone(channel: 'sms' | 'whatsapp' | null): RegistrationStatus {
+/**
+ * A server status with the phone already proven over SMS (or not proven at all
+ * when `channel` is null). WhatsApp is not a registration factor.
+ */
+function fullyVerifiedStatus(): RegistrationStatus {
   return {
     walletAddress: null,
     active: true,
-    personalVerified: channel !== null,
+    personalVerified: true,
     aadhaarDocumentStatus: 'verified',
     emailVerified: true,
-    smsOtpVerified: channel === 'sms',
-    whatsappOtpVerified: channel === 'whatsapp',
-    phoneVerified: channel !== null,
-    phoneChannel: channel,
     aadhaarMobileLinked: true,
     passwordSet: true,
     photoStatus: 'verified',
@@ -305,32 +304,33 @@ test('[personal/form] Continue stays disabled until every required field is vali
 
 // ─── Phone verification is EITHER-or, and gates the personal step ─────────
 
-test('[personal/phone-step] the personal step stays open until a phone is verified', () => {
+test('[personal/email-step] the personal step stays open until the citizen continues', () => {
   // No session at all → personal.
   assert.equal(currentRegistrationStep(null), 'personal');
-  // Details stored but no phone proven → still personal (the two-phase gate).
-  const unverified = { ...statusWithPhone(null), personalVerified: false };
+  // Details stored but the citizen has not pressed Continue yet → still personal.
+  const unverified = { ...fullyVerifiedStatus(), personalVerified: false };
   assert.equal(currentRegistrationStep(unverified), 'personal');
 });
 
-test('[personal/phone-step] EITHER SMS or WhatsApp satisfies phone verification', () => {
-  // SMS alone must be enough to move past the phone steps.
-  const viaSms = statusWithPhone('sms');
-  assert.equal(viaSms.smsOtpVerified, true);
-  assert.equal(viaSms.whatsappOtpVerified, false, 'the other channel is NOT required');
-  assert.equal(currentRegistrationStep(viaSms), 'finalize', 'SMS alone advances the stepper');
-
-  // WhatsApp alone must be equally sufficient.
-  const viaWhatsapp = statusWithPhone('whatsapp');
-  assert.equal(viaWhatsapp.whatsappOtpVerified, true);
-  assert.equal(viaWhatsapp.smsOtpVerified, false);
-  assert.equal(currentRegistrationStep(viaWhatsapp), 'finalize', 'WhatsApp alone advances too');
+test('[personal/email-step] a fully verified status reaches the final step', () => {
+  const complete = fullyVerifiedStatus();
+  assert.equal(complete.emailVerified, true);
+  assert.equal(currentRegistrationStep(complete), 'finalize', 'a complete status advances the stepper');
 });
 
-test('[personal/phone-step] a later incomplete step still wins over the phone steps', () => {
-  const partial = { ...statusWithPhone('sms'), emailVerified: false };
-  assert.equal(currentRegistrationStep(partial), 'email');
-  const noPassword = { ...statusWithPhone('whatsapp'), passwordSet: false };
+test('[personal/email-step] email is a REQUIRED gate that cannot be skipped', () => {
+  // Email verification is the registration gate: without it the stepper must
+  // stop at the email step and must never reach finalize.
+  const unproven = { ...fullyVerifiedStatus(), emailVerified: false };
+  assert.equal(unproven.emailVerified, false);
+  assert.equal(currentRegistrationStep(unproven), 'email', 'the email step is not done');
+  assert.notEqual(currentRegistrationStep(unproven), 'finalize', 'it must not complete');
+});
+
+test('[personal/email-step] a later incomplete step still wins over earlier ones', () => {
+  const partial = { ...fullyVerifiedStatus(), aadhaarDocumentStatus: 'unverified' as const };
+  assert.equal(currentRegistrationStep(partial), 'aadhaar-document');
+  const noPassword = { ...fullyVerifiedStatus(), passwordSet: false };
   assert.equal(currentRegistrationStep(noPassword), 'password');
 });
 

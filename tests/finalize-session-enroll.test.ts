@@ -108,8 +108,6 @@ function completeSession(): RegistrationSession {
     emailVerifiedAt: now,
     smsOtpVerified: true,
     smsOtpVerifiedAt: now,
-    whatsappOtpVerified: true,
-    whatsappOtpVerifiedAt: now,
     aadhaarMobileLinked: true,
     aadhaarMobileLinkedAt: now,
     passwordHash: 'test-hash',

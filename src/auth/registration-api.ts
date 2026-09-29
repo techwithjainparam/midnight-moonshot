@@ -161,9 +161,9 @@ export async function submitRegistrationPersonal(
 /**
  * POST /api/v1/registration/personal/complete — phase 2.
  *
- * The explicit Continue gate. It fails closed unless the stored phone number
- * has already been verified over SMS or WhatsApp, so the button reflects a
- * server decision rather than a client-side assumption.
+ * The explicit Continue gate. It fails closed unless the encrypted personal
+ * record is already stored, so the button reflects a server decision rather
+ * than a client-side assumption.
  */
 export async function completeRegistrationPersonal(): Promise<
   RegistrationApiResult<RegistrationStatus>
@@ -211,30 +211,6 @@ export async function verifyRegistrationEmailOtp(
   code: string,
 ): Promise<RegistrationApiResult<{ emailVerified: boolean }>> {
   return postJson('/v1/registration/email/verify', { code });
-}
-
-/** POST /api/v1/registration/sms/issue */
-export async function issueRegistrationSmsOtp(): Promise<RegistrationApiResult<{ delivered: boolean }>> {
-  return postJson('/v1/registration/sms/issue', {});
-}
-
-/** POST /api/v1/registration/sms/verify */
-export async function verifyRegistrationSmsOtp(
-  code: string,
-): Promise<RegistrationApiResult<{ smsOtpVerified: boolean }>> {
-  return postJson('/v1/registration/sms/verify', { code });
-}
-
-/** POST /api/v1/registration/whatsapp/issue */
-export async function issueRegistrationWhatsappOtp(): Promise<RegistrationApiResult<{ delivered: boolean }>> {
-  return postJson('/v1/registration/whatsapp/issue', {});
-}
-
-/** POST /api/v1/registration/whatsapp/verify */
-export async function verifyRegistrationWhatsappOtp(
-  code: string,
-): Promise<RegistrationApiResult<{ whatsappOtpVerified: boolean }>> {
-  return postJson('/v1/registration/whatsapp/verify', { code });
 }
 
 /**

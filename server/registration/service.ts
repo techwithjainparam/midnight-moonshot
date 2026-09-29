@@ -5,7 +5,7 @@
 // This service drives the FULL registration stepper with REAL server-side work
 // behind every step:
 //
-//   personal → aadhaar-document → email → sms-otp → whatsapp-otp →
+//   personal → aadhaar-document → email →
 //   aadhaar-mobile → password → photo → liveness → location → FINALIZE
 //
 //   * personal      — validates name/Aadhaar/pincode(India Post)/DOB/mobile; PII
@@ -13,8 +13,6 @@
 //   * aadhaar-doc   — REAL OCR via a vendor adapter; extraction cross-checked
 //                     against the entered name; filename is NEVER read,
 //   * email         — disposable-domain rejection + per-address rate limits,
-//   * sms/whatsapp  — REAL delivery adapters; codes are hashed, single-use,
-//                     expiring, rate-limited,
 //   * aadhaar-mobile— authorized KYC provider link check / OTP challenge,
 //   * password      — salted scrypt hash ONLY (never plaintext),
 //   * photo         — server-side PNG validation (real per-pixel corner checks),
@@ -32,8 +30,6 @@ import { hashPassword } from '../account/security.js';
 import * as model from '../account/model.js';
 import { maskAadhaar, maskEmail, passwordIssues, rejectIdentityEvidence, type IdentityEvidence } from '../account/model.js';
 import type { AccountService } from '../account/service.js';
-import type { SmsProvider } from '../account/sms-provider.js';
-import type { WhatsAppProvider } from '../account/whatsapp-provider.js';
 import { OtpService } from '../lib/otp-service.js';
 import type { Mailer } from '../lib/mailer.js';
 import { otpEmailHtml, otpEmailText } from '../lib/mailer.js';
@@ -73,8 +69,6 @@ export interface RegistrationServiceOptions {
   readonly accounts: AccountService;
   readonly mailer: Mailer | null;
   readonly otp: { readonly hashSecret: string };
-  readonly smsProvider: SmsProvider;
-  readonly whatsAppProvider: WhatsAppProvider;
   readonly aadhaarProvider: IdentityVerificationProvider | null;
   readonly aadhaarOcr: AadhaarOcrProvider;
   readonly pincodeProvider: PincodeProvider;
@@ -128,11 +122,7 @@ export class RegistrationService {
   private readonly store: RegistrationSessionStore;
   private readonly accounts: AccountService;
   private readonly mailer: Mailer | null;
-  private readonly smsOtp: OtpService;
-  private readonly whatsappOtp: OtpService;
   private readonly emailOtp: OtpService;
-  private readonly smsProvider: SmsProvider;
-  private readonly whatsAppProvider: WhatsAppProvider;
   private readonly aadhaarProvider: IdentityVerificationProvider | null;
   private readonly aadhaarOcr: AadhaarOcrProvider;
   private readonly pincodeProvider: PincodeProvider;
@@ -147,8 +137,6 @@ export class RegistrationService {
     this.store = options.store;
     this.accounts = options.accounts;
     this.mailer = options.mailer;
-    this.smsProvider = options.smsProvider;
-    this.whatsAppProvider = options.whatsAppProvider;
     this.aadhaarProvider = options.aadhaarProvider;
     this.aadhaarOcr = options.aadhaarOcr;
     this.pincodeProvider = options.pincodeProvider;
@@ -158,17 +146,7 @@ export class RegistrationService {
     this.photoConfig = options.photoConfig ?? {};
     this.sessionTtlMs = options.sessionTtlMs ?? 2 * 60 * 60 * 1000;
     this.now = options.now ?? Date.now;
-    this.smsOtp = new OtpService({ hashSecret: options.otp.hashSecret, now: options.now });
-    this.whatsappOtp = new OtpService({ hashSecret: options.otp.hashSecret, now: options.now });
     this.emailOtp = new OtpService({ hashSecret: options.otp.hashSecret, now: options.now });
-  }
-
-  get smsConfigured(): boolean {
-    return this.smsProvider.configured;
-  }
-
-  get whatsappConfigured(): boolean {
-    return this.whatsAppProvider.configured;
   }
 
   get emailConfigured(): boolean {
@@ -193,8 +171,6 @@ export class RegistrationService {
 
   /** Capabilities echoed to the registration UI so steps can fail honestly. */
   get capabilities(): {
-    smsConfigured: boolean;
-    whatsappConfigured: boolean;
     emailConfigured: boolean;
     aadhaarOcrConfigured: boolean;
     aadhaarMobileConfigured: boolean;
@@ -202,8 +178,6 @@ export class RegistrationService {
     geocodingConfigured: boolean;
   } {
     return {
-      smsConfigured: this.smsConfigured,
-      whatsappConfigured: this.whatsappConfigured,
       emailConfigured: this.emailConfigured,
       aadhaarOcrConfigured: this.aadhaarOcrConfigured,
       aadhaarMobileConfigured: this.aadhaarMobileConfigured,
@@ -237,8 +211,6 @@ export class RegistrationService {
       emailVerifiedAt: null,
       smsOtpVerified: false,
       smsOtpVerifiedAt: null,
-      whatsappOtpVerified: false,
-      whatsappOtpVerifiedAt: null,
       aadhaarMobileLinked: false,
       aadhaarMobileLinkedAt: null,
       passwordHash: null,
@@ -267,11 +239,10 @@ export class RegistrationService {
   // ── Personal details + pincode ──────────────────────────────────
   //
   // This is PHASE 1 of the two-phase personal step. It validates and stores the
-  // encrypted PII record only; the step is NOT complete yet. `personalVerified`
-  // is additionally gated on a verified phone number (see toRegistrationStatus),
-  // so the citizen must confirm the number over SMS or WhatsApp before the
-  // stepper can advance. `completePersonal()` is the explicit phase-2 gate the
-  // Continue button calls.
+  // encrypted PII record only; the step is NOT complete yet.
+  // `completePersonal()` is the explicit phase-2 gate the Continue button
+  // calls, so the advance is server-authoritative rather than a client-side
+  // fiction.
 
   async personal(token: string, input: PersonalDetailsInput): Promise<RegistrationResult<RegistrationStatus>> {
     const session = this.mustLoad(token);
@@ -389,13 +360,10 @@ export class RegistrationService {
       personalPiiCipherText: profileCipher,
       maskedMobile,
       maskedAadhaar: maskAadhaar(aadhaarNumber),
-      // Editing the details invalidates any earlier phone confirmation: the
-      // number may have changed, so both channels must be proven again. It also
-      // revokes the Continue the citizen had already given.
+      // Editing the details revokes the Continue the citizen had already
+      // given, so the personal step must be completed again.
       smsOtpVerified: false,
       smsOtpVerifiedAt: null,
-      whatsappOtpVerified: false,
-      whatsappOtpVerifiedAt: null,
       personalCompletedAt: null,
     };
     const updated = this.store.update(token, patch) ?? session;
@@ -405,22 +373,15 @@ export class RegistrationService {
   /**
    * PHASE 2 of the personal step: the explicit gate the Continue button calls.
    *
-   * Refuses until the stored phone number has been confirmed over a REAL
-   * channel (SMS or WhatsApp — either satisfies it). This is what makes the
+   * Requires the encrypted PII record to exist; this is what makes the
    * Continue button server-authoritative rather than a client-side fiction.
+   * Contact verification is a separate gate (email OTP) enforced at finalize.
    */
   completePersonal(token: string): RegistrationResult<RegistrationStatus> {
     const session = this.mustLoad(token);
     if (session === null) return { ok: false, reason: 'not-found' };
     if (!session.personalPiiCipherText || !session.maskedMobile) {
       return { ok: false, reason: 'bad-state', message: 'Complete personal details first.' };
-    }
-    if (!session.smsOtpVerified && !session.whatsappOtpVerified) {
-      return {
-        ok: false,
-        reason: 'bad-state',
-        message: 'Verify your phone number over SMS or WhatsApp before continuing.',
-      };
     }
     // Durable, so the advance survives a reload and cannot be replayed by a
     // client that simply stops asking. Editing the details clears it again.
@@ -567,81 +528,10 @@ export class RegistrationService {
     if (session === null) return { ok: false, reason: 'not-found' };
     const key = OtpService.keyFor('reg-email', session.sessionToken);
     const result = this.emailOtp.verify(key, code);
-    if (!result.ok) {
-      if (result.reason === 'invalid') {
-        return { ok: false, reason: 'invalid-input', issues: ['That code is incorrect. Try again.'] };
-      }
-      return { ok: false, reason: 'bad-state', message: 'That code expired or was used too many times. Request a new one.' };
-    }
+    if (!result.ok) return this.otpVerifyFailure(result.reason);
     const now = this.now();
     this.store.update(token, { emailVerified: true, emailVerifiedAt: now });
     return { ok: true, value: { emailVerified: true } };
-  }
-
-  // ── SMS + WhatsApp OTP (delivery via REAL adapters) ──────────────
-
-  async issueSmsOtp(token: string): Promise<RegistrationResult<{ delivered: boolean }>> {
-    const session = this.mustLoad(token);
-    if (session === null) return { ok: false, reason: 'not-found' };
-    if (!session.personalPiiCipherText || !session.maskedMobile) {
-      return { ok: false, reason: 'bad-state', message: 'Complete personal details first.' };
-    }
-    if (!this.smsProvider.configured) return { ok: false, reason: 'unavailable', message: 'Mobile confirmation is temporarily unavailable. Please try again later.' };
-    const profile = this.decryptProfile(session);
-    if (!profile) return { ok: false, reason: 'bad-state', message: 'Complete personal details first.' };
-
-    const key = OtpService.keyFor('reg-sms', session.sessionToken);
-    const begun = this.smsOtp.beginIssue(key);
-    if (!begun.ok) {
-      return { ok: false, reason: 'provider-error', message: begun.reason === 'cooldown' ? 'Please wait before requesting another code.' : 'Too many codes requested. Try again later.' };
-    }
-    const delivery = await this.smsProvider.send(profile.mobileE164, begun.code);
-    if (!delivery.ok) return { ok: false, reason: 'provider-error', message: 'The code could not be delivered. Try again shortly.' };
-    const committed = this.smsOtp.commitIssue(key, begun.code, begun.expiresAt);
-    if (!committed.ok) return { ok: false, reason: 'provider-error', message: 'Too many codes requested. Try again later.' };
-    return { ok: true, value: { delivered: true } };
-  }
-
-  verifySmsOtp(token: string, code: string): RegistrationResult<{ smsOtpVerified: boolean }> {
-    const session = this.mustLoad(token);
-    if (session === null) return { ok: false, reason: 'not-found' };
-    const result = this.smsOtp.verify(OtpService.keyFor('reg-sms', session.sessionToken), code);
-    if (!result.ok) return this.otpVerifyFailure(result.reason);
-    const now = this.now();
-    this.store.update(token, { smsOtpVerified: true, smsOtpVerifiedAt: now });
-    return { ok: true, value: { smsOtpVerified: true } };
-  }
-
-  async issueWhatsappOtp(token: string): Promise<RegistrationResult<{ delivered: boolean }>> {
-    const session = this.mustLoad(token);
-    if (session === null) return { ok: false, reason: 'not-found' };
-    if (!session.personalPiiCipherText || !session.maskedMobile) {
-      return { ok: false, reason: 'bad-state', message: 'Complete personal details first.' };
-    }
-    if (!this.whatsAppProvider.configured) return { ok: false, reason: 'unavailable', message: 'Confirmation by WhatsApp is temporarily unavailable. Please try again later.' };
-    const profile = this.decryptProfile(session);
-    if (!profile) return { ok: false, reason: 'bad-state', message: 'Complete personal details first.' };
-
-    const key = OtpService.keyFor('reg-whatsapp', session.sessionToken);
-    const begun = this.whatsappOtp.beginIssue(key);
-    if (!begun.ok) {
-      return { ok: false, reason: 'provider-error', message: begun.reason === 'cooldown' ? 'Please wait before requesting another code.' : 'Too many codes requested. Try again later.' };
-    }
-    const delivery = await this.whatsAppProvider.send(profile.mobileE164, begun.code);
-    if (!delivery.ok) return { ok: false, reason: 'provider-error', message: 'The code could not be delivered. Try again shortly.' };
-    const committed = this.whatsappOtp.commitIssue(key, begun.code, begun.expiresAt);
-    if (!committed.ok) return { ok: false, reason: 'provider-error', message: 'Too many codes requested. Try again later.' };
-    return { ok: true, value: { delivered: true } };
-  }
-
-  verifyWhatsappOtp(token: string, code: string): RegistrationResult<{ whatsappOtpVerified: boolean }> {
-    const session = this.mustLoad(token);
-    if (session === null) return { ok: false, reason: 'not-found' };
-    const result = this.whatsappOtp.verify(OtpService.keyFor('reg-whatsapp', session.sessionToken), code);
-    if (!result.ok) return this.otpVerifyFailure(result.reason);
-    const now = this.now();
-    this.store.update(token, { whatsappOtpVerified: true, whatsappOtpVerifiedAt: now });
-    return { ok: true, value: { whatsappOtpVerified: true } };
   }
 
   // ── Aadhaar-mobile linkage (authorized KYC provider) ─────────────
@@ -809,9 +699,6 @@ export class RegistrationService {
     if (!session.personalPiiCipherText) missing.push('Personal details');
     if (session.aadhaarDocumentStatus !== 'verified') missing.push('Aadhaar document');
     if (!session.emailVerified) missing.push('Email');
-    // Phone is EITHER-or: one real channel (SMS or WhatsApp) is enough. The
-    // citizen picks their method; we never require both.
-    if (!session.smsOtpVerified && !session.whatsappOtpVerified) missing.push('Phone verification');
     if (!session.aadhaarMobileLinked) missing.push('Aadhaar-mobile link');
     if (!session.passwordHash || !session.passwordSalt) missing.push('Password');
     if (session.photoStatus !== 'verified') missing.push('Photo');

@@ -42,10 +42,6 @@ import {
   uploadAadhaarDocument,
   postEmail,
   verifyRegistrationEmailOtp,
-  issueRegistrationSmsOtp,
-  verifyRegistrationSmsOtp,
-  issueRegistrationWhatsappOtp,
-  verifyRegistrationWhatsappOtp,
   startRegistrationAadhaarMobile,
   completeRegistrationAadhaarMobile,
   setRegistrationPassword,
@@ -65,8 +61,8 @@ import { useAuth } from '../auth/AuthContext';
 // PRIESTATE — Secure user registration (`/register-account`), Part 1 flow.
 //
 // This page drives the REAL server-side registration stepper
-// (`/api/v1/registration/*`): personal → Aadhaar OCR → email → SMS OTP →
-// WhatsApp OTP → Aadhaar-mobile link → password → photo → liveness → location
+// (`/api/v1/registration/*`): personal → Aadhaar OCR → email
+// verification → Aadhaar-mobile link → password → photo → liveness → location
 // → finalize. Every decision is server-authoritative (the HttpOnly
 // `priestate_reg_sid` session cookie set at `begin`), and every step that needs
 // a real external provider FAILS CLOSED when that provider is unconfigured.
@@ -167,12 +163,6 @@ export default function UserRegistrationPage() {
     setPersonalTouched((t) => (t[field] ? t : { ...t, [field]: true }));
   }, []);
 
-  // ── Phone verification (compulsory, SMS OR WhatsApp) ─────────────
-  type PhoneChannel = 'sms' | 'whatsapp';
-  const [phoneChannel, setPhoneChannel] = useState<PhoneChannel>('sms');
-  const [phoneCodeSent, setPhoneCodeSent] = useState(false);
-  const [phoneCode, setPhoneCode] = useState('');
-
   // ── GPS address capture ──────────────────────────────────────────
   type LocationPhase = 'idle' | 'requesting' | 'resolving' | 'resolved' | 'denied' | 'unavailable' | 'failed';
   const [locationPhase, setLocationPhase] = useState<LocationPhase>('idle');
@@ -196,14 +186,10 @@ export default function UserRegistrationPage() {
   /** Snapshot of the values that were actually saved, to detect later edits. */
   const [savedValuesKey, setSavedValuesKey] = useState<string | null>(null);
 
-  // ── Email / SMS / WhatsApp OTP state ─────────────────────────────
+  // ── Email verification state ─────────────────────────────────────
   const [email, setEmail] = useState('');
   const [emailCode, setEmailCode] = useState('');
   const [emailSent, setEmailSent] = useState(false);
-  const [smsSent, setSmsSent] = useState(false);
-  const [smsCode, setSmsCode] = useState('');
-  const [waSent, setWaSent] = useState(false);
-  const [waCode, setWaCode] = useState('');
 
   // ── Aadhaar-mobile link state ────────────────────────────────────
   const [amChallenge, setAmChallenge] = useState<{ sessionId: string; expiresAt: number } | null>(null);
@@ -504,19 +490,14 @@ export default function UserRegistrationPage() {
    */
   const errorFor = (field: PersonalFieldName): string | undefined =>
     (showPersonalErrors || personalTouched[field] ? personalErrors[field] : undefined);
-  /** Editing any field after phase 1 invalidates the earlier phone proof. */
+  /** Editing any field after phase 1 re-opens the personal step. */
   const personalValuesKey = JSON.stringify(personalValues);
   const personalHasUnsavedEdits = personalSaved && savedValuesKey !== personalValuesKey;
-  /** Server-authoritative: has a real channel proven the stored number? */
-  const phoneVerified = status?.phoneVerified === true;
   /** True when a previous session already stored the details. */
   const detailsOnServer = personalSaved || Boolean(status?.maskedMobile);
-  const activeChannelConfigured =
-    phoneChannel === 'sms' ? caps?.smsConfigured === true : caps?.whatsappConfigured === true;
-  const anyChannelConfigured = caps?.smsConfigured === true || caps?.whatsappConfigured === true;
-  /** Continue unlocks only once the form is valid AND the phone is proven. */
+  /** Continue unlocks once the form is valid and stored server-side. */
   const canContinuePersonal =
-    personalFormComplete && detailsOnServer && !personalHasUnsavedEdits && phoneVerified;
+    personalFormComplete && detailsOnServer && !personalHasUnsavedEdits;
 
   return (
     <div className="page profile-page">
@@ -554,11 +535,7 @@ export default function UserRegistrationPage() {
             {/* ── Resume state: details already on the server ── */}
             {detailsOnServer && (
               <div className="status-msg success" role="status">
-                {phoneVerified
-                  ? `Phone number confirmed${
-                      status?.phoneChannel === 'whatsapp' ? ' via WhatsApp' : ' via SMS'
-                    }${status?.maskedMobile ? ` (${status.maskedMobile})` : ''}. You can continue.`
-                  : `Your details are saved${status?.maskedMobile ? ` for ${status.maskedMobile}` : ''}. Verify your phone number to continue.`}
+                {`Your details are saved${status?.maskedMobile ? ` for ${status.maskedMobile}` : ''}. You can continue.`}
               </div>
             )}
 
@@ -674,111 +651,15 @@ export default function UserRegistrationPage() {
                   not: say so plainly rather than implying a foreign path. */}
               {countryCode !== DEFAULT_COUNTRY_CODE && (
                 <p className="form-hint" role="note">
-                  Your verification code is sent to this number. Aadhaar, the PIN code
-                  and the state list remain Indian, so a foreign number does not change
-                  the documents you will be verified against.
+                  Aadhaar, the PIN code and the state list remain Indian, so a foreign
+                  number does not change the documents you will be verified against.
                 </p>
               )}
 
-              {/* Verification method: EITHER channel satisfies the requirement. */}
-              <div className="form-field">
-                <span className="form-label" id="phone-method-label">Verification method</span>
-                <div className="verify-mobile-row" role="radiogroup" aria-labelledby="phone-method-label">
-                  <label className={`verify-choice${phoneChannel === 'sms' ? ' verify-choice-on' : ''}${caps && !caps.smsConfigured ? ' verify-choice-off' : ''}`}>
-                    <input
-                      type="radio"
-                      name="phone-channel"
-                      value="sms"
-                      checked={phoneChannel === 'sms'}
-                      onChange={() => { setPhoneChannel('sms'); setPhoneCodeSent(false); setPhoneCode(''); }}
-                    />
-                    <span> SMS{caps && !caps.smsConfigured ? ' (not configured)' : ''}</span>
-                  </label>
-                  <label className={`verify-choice${phoneChannel === 'whatsapp' ? ' verify-choice-on' : ''}${caps && !caps.whatsappConfigured ? ' verify-choice-off' : ''}`}>
-                    <input
-                      type="radio"
-                      name="phone-channel"
-                      value="whatsapp"
-                      checked={phoneChannel === 'whatsapp'}
-                      onChange={() => { setPhoneChannel('whatsapp'); setPhoneCodeSent(false); setPhoneCode(''); }}
-                    />
-                    <span> WhatsApp{caps && !caps.whatsappConfigured ? ' (not configured)' : ''}</span>
-                  </label>
-                </div>
-                <span className="form-hint">Stored encrypted; always shown masked. We never print the code here.</span>
-              </div>
-
-              {/* Provider-unavailable state — never faked, never auto-accepted. */}
-              {caps && !anyChannelConfigured && (
-                <div className="status-msg error" role="alert">
-                  Phone verification is currently unavailable: no SMS or WhatsApp
-                  provider is configured. We will not proceed without verifying
-                  your number. Please contact support or try again later.
-                </div>
-              )}
-              {caps && anyChannelConfigured && !activeChannelConfigured && (
-                <div className="status-msg warn" role="status">
-                  {phoneChannel === 'sms' ? 'SMS' : 'WhatsApp'} delivery is not
-                  configured. Choose the other method to verify your number.
-                </div>
-              )}
-
-              {phoneVerified ? (
-                <div className="status-msg success" role="status">
-                  Phone number verified{status?.phoneChannel === 'whatsapp' ? ' via WhatsApp' : ' via SMS'}.
-                </div>
-              ) : !phoneCodeSent ? (
-                <div className="account-card-actions">
-                  <button
-                    className="btn btn-primary"
-                    onClick={() => void handleVerifyPhone()}
-                    disabled={
-                      stepBusy ||
-                      (!personalFormComplete && !detailsOnServer) ||
-                      (caps ? !activeChannelConfigured : false)
-                    }
-                  >
-                    {stepBusy ? 'Sending…' : 'Verify Phone'}
-                  </button>
-                </div>
-              ) : (
-                <div className="form-field">
-                  <label className="form-label" htmlFor="reg-phone-code">
-                    Enter the code sent by {phoneChannel === 'sms' ? 'SMS' : 'WhatsApp'}
-                  </label>
-                  <div className="verify-mobile-row">
-                    <input
-                      id="reg-phone-code"
-                      type="text"
-                      inputMode="numeric"
-                      autoComplete="one-time-code"
-                      maxLength={6}
-                      placeholder="_ _ _ _ _ _"
-                      className="form-input"
-                      value={phoneCode}
-                      onChange={(e) => setPhoneCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                    />
-                    <button
-                      className="btn btn-primary"
-                      onClick={() => void handleVerifyPhoneCode()}
-                      disabled={stepBusy || phoneCode.length !== 6}
-                    >
-                      {stepBusy ? 'Verifying…' : 'Confirm code'}
-                    </button>
-                  </div>
-                  <button
-                    className="btn btn-ghost"
-                    onClick={() => void handleVerifyPhone()}
-                    disabled={stepBusy}
-                  >
-                    Resend code
-                  </button>
-                </div>
-              )}
               <span className="form-hint">
                 {status?.maskedMobile
-                  ? `A code will be sent to ${status.maskedMobile}.`
-                  : 'Your details are saved first, then the code is sent to that number.'}
+                  ? `Stored encrypted; always shown masked as ${status.maskedMobile}.`
+                  : 'Stored encrypted and always shown masked. We never print it in full.'}
               </span>
             </fieldset>
 
@@ -1155,99 +1036,6 @@ export default function UserRegistrationPage() {
           </section>
         )}
 
-        {step === 'sms-otp' && (
-          <section className="account-section">
-            <div className="account-stage-eyebrow">
-              Step {REGISTRATION_STAGE_ORDER.indexOf('identity') + 1} of {REGISTRATION_STAGE_ORDER.length} — {REGISTRATION_STAGE_LABELS.identity}
-            </div>
-            <h2 className="account-section-title">Confirm your mobile number</h2>
-            <p className="account-section-desc">
-              A one-time code is sent to your mobile number so we can confirm it
-              belongs to you. Your number is stored encrypted and shown only
-              masked.
-            </p>
-            {caps && !caps.smsConfigured && (
-              <div className="status-msg error" role="alert">
-                Mobile confirmation is temporarily unavailable. Please try again later.
-              </div>
-            )}
-            {!smsSent ? (
-              <div className="account-card-actions">
-                <button className="btn btn-primary" onClick={() => void handleSendSms()} disabled={stepBusy || Boolean(caps && !caps.smsConfigured)}>
-                  {stepBusy ? 'Sending…' : 'Send code'}
-                </button>
-              </div>
-            ) : (
-              <div className="form-row">
-                <div className="form-field">
-                  <label className="form-label" htmlFor="reg-sms-code">One-time code</label>
-                  <input
-                    id="reg-sms-code"
-                    type="text"
-                    inputMode="numeric"
-                    className="form-input"
-                    maxLength={6}
-                    placeholder="_ _ _ _ _ _"
-                    value={smsCode}
-                    onChange={(e) => setSmsCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                  />
-                </div>
-                <div className="account-card-actions">
-                  <button className="btn btn-primary" onClick={() => void handleVerifySms()} disabled={stepBusy || smsCode.length !== 6}>
-                    {stepBusy ? 'Verifying…' : 'Verify code'}
-                  </button>
-                </div>
-              </div>
-            )}
-            <span className="form-hint">{status?.maskedMobile ? `Delivered to ${status.maskedMobile}.` : ''}</span>
-          </section>
-        )}
-
-        {step === 'whatsapp-otp' && (
-          <section className="account-section">
-            <div className="account-stage-eyebrow">
-              Step {REGISTRATION_STAGE_ORDER.indexOf('identity') + 1} of {REGISTRATION_STAGE_ORDER.length} — {REGISTRATION_STAGE_LABELS.identity}
-            </div>
-            <h2 className="account-section-title">Confirm on WhatsApp</h2>
-            <p className="account-section-desc">
-              A separate one-time code is sent over WhatsApp as an independent
-              security check that your number is really yours.
-            </p>
-            {caps && !caps.whatsappConfigured && (
-              <div className="status-msg error" role="alert">
-                Confirmation by WhatsApp is temporarily unavailable. Please try again later.
-              </div>
-            )}
-            {!waSent ? (
-              <div className="account-card-actions">
-                <button className="btn btn-primary" onClick={() => void handleSendWhatsapp()} disabled={stepBusy || Boolean(caps && !caps.whatsappConfigured)}>
-                  {stepBusy ? 'Sending…' : 'Send code'}
-                </button>
-              </div>
-            ) : (
-              <div className="form-row">
-                <div className="form-field">
-                  <label className="form-label" htmlFor="reg-wa-code">One-time code</label>
-                  <input
-                    id="reg-wa-code"
-                    type="text"
-                    inputMode="numeric"
-                    className="form-input"
-                    maxLength={6}
-                    placeholder="_ _ _ _ _ _"
-                    value={waCode}
-                    onChange={(e) => setWaCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                  />
-                </div>
-                <div className="account-card-actions">
-                  <button className="btn btn-primary" onClick={() => void handleVerifyWhatsapp()} disabled={stepBusy || waCode.length !== 6}>
-                    {stepBusy ? 'Verifying…' : 'Verify code'}
-                  </button>
-                </div>
-              </div>
-            )}
-          </section>
-        )}
 
         {step === 'aadhaar-mobile' && (
           <section className="account-section">
@@ -1537,11 +1325,7 @@ export default function UserRegistrationPage() {
       return;
     }
     if (!detailsOnServer) {
-      setStepError('Save your details before verifying your phone number.');
-      return;
-    }
-    if (!phoneVerified) {
-      setStepError('Verify your phone number over SMS or WhatsApp before continuing.');
+      setStepError('Save your details before continuing.');
       return;
     }
     setStepBusy(true);
@@ -1629,80 +1413,6 @@ export default function UserRegistrationPage() {
     if (resolved.pincode && !pincode.trim()) setPincode(resolved.pincode.replace(/\D/g, '').slice(0, 6));
     setAddressTouched(false);
   }
-
-  /**
-   * Send the one-time code over the selected channel.
-   *
-   * Phase 1 lands first, because the gateways deliver to the stored number.
-   * When no provider is configured this surfaces the unavailable state instead
-   * of pretending a code was sent.
-   */
-  async function handleVerifyPhone(): Promise<void> {
-    setStepError(null);
-    setShowPersonalErrors(true);
-    // A resumed session already has the number on the server — only the MASKED
-    // form comes back, by design, so the local fields are empty. The OTP
-    // gateways deliver to the STORED number, so there is nothing to re-enter
-    // and nothing to re-save; requiring a locally complete form here would
-    // strand anyone who refreshed the page mid-verification.
-    const resuming = detailsOnServer && !personalHasUnsavedEdits;
-    if (!personalFormComplete && !resuming) {
-      setStepError('Please correct the highlighted fields before verifying your phone.');
-      return;
-    }
-    if (!activeChannelConfigured) {
-      setStepError(
-        phoneChannel === 'sms'
-          ? 'SMS delivery is not configured. Choose WhatsApp or try again later.'
-          : 'WhatsApp delivery is not configured. Choose SMS or try again later.',
-      );
-      return;
-    }
-    setStepBusy(true);
-    try {
-      // Only push details when they are actually complete on this device;
-      // re-saving a resumed session would needlessly revoke nothing but would
-      // also demand the full form again.
-      if (!resuming && !(await savePersonalDetails())) return;
-      const r =
-        phoneChannel === 'sms' ? await issueRegistrationSmsOtp() : await issueRegistrationWhatsappOtp();
-      if (r.ok) {
-        setPhoneCodeSent(true);
-        setPhoneCode('');
-      } else {
-        setPhoneCodeSent(false);
-        setStepError(failureMessage(r));
-      }
-    } finally {
-      setStepBusy(false);
-    }
-  }
-
-  /** Confirm the one-time code over the channel that issued it. */
-  async function handleVerifyPhoneCode(): Promise<void> {
-    setStepError(null);
-    setStepBusy(true);
-    try {
-      const r =
-        phoneChannel === 'sms'
-          ? await verifyRegistrationSmsOtp(phoneCode)
-          : await verifyRegistrationWhatsappOtp(phoneCode);
-      if (r.ok) {
-        const st = await refreshStatus();
-        if (st?.phoneVerified) {
-          setPhoneCode('');
-          setPhoneCodeSent(false);
-        } else {
-          setStepError('That code was not accepted. Request a new one and try again.');
-        }
-      } else {
-        setStepError(failureMessage(r));
-      }
-    } finally {
-      setStepBusy(false);
-    }
-  }
-
   async function handleAadhaarDoc(file: File | null): Promise<void> {
     if (!file) return;
     setStepError(null);
@@ -1741,70 +1451,6 @@ export default function UserRegistrationPage() {
     try {
       const r = await verifyRegistrationEmailOtp(emailCode);
       if (r.ok) {
-        await refreshStatus();
-      } else {
-        setStepError(failureMessage(r));
-      }
-    } finally {
-      setStepBusy(false);
-    }
-  }
-
-  async function handleSendSms(): Promise<void> {
-    setStepError(null);
-    setStepBusy(true);
-    try {
-      const r = await issueRegistrationSmsOtp();
-      if (r.ok) {
-        setSmsSent(true);
-      } else {
-        setStepError(failureMessage(r));
-      }
-    } finally {
-      setStepBusy(false);
-    }
-  }
-
-  async function handleVerifySms(): Promise<void> {
-    setStepError(null);
-    setStepBusy(true);
-    try {
-      const r = await verifyRegistrationSmsOtp(smsCode);
-      if (r.ok) {
-        setSmsCode('');
-        setSmsSent(false);
-        await refreshStatus();
-      } else {
-        setStepError(failureMessage(r));
-      }
-    } finally {
-      setStepBusy(false);
-    }
-  }
-
-  async function handleSendWhatsapp(): Promise<void> {
-    setStepError(null);
-    setStepBusy(true);
-    try {
-      const r = await issueRegistrationWhatsappOtp();
-      if (r.ok) {
-        setWaSent(true);
-      } else {
-        setStepError(failureMessage(r));
-      }
-    } finally {
-      setStepBusy(false);
-    }
-  }
-
-  async function handleVerifyWhatsapp(): Promise<void> {
-    setStepError(null);
-    setStepBusy(true);
-    try {
-      const r = await verifyRegistrationWhatsappOtp(waCode);
-      if (r.ok) {
-        setWaCode('');
-        setWaSent(false);
         await refreshStatus();
       } else {
         setStepError(failureMessage(r));
@@ -1927,7 +1573,7 @@ export default function UserRegistrationPage() {
 // ── Presentational stage rail ──────────────────────────────────────
 //
 // The citizen sees only the five user-facing stages — NOT the internal
-// provider/method checklist (OCR, SMS/WhatsApp OTP, liveness, etc.). The
+  // provider/method checklist (OCR, email OTP, liveness, etc.). The
 // active stage is derived from the server-authoritative step; the full
 // verification pipeline still runs underneath, exactly as before.
 

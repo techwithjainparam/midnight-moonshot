@@ -579,8 +579,6 @@ test('[api] unconfigured features respond 503 with honest unavailability message
       aadhaarMobile: false,
       registry: false,
       registration: {
-        smsConfigured: false,
-        whatsappConfigured: false,
         emailConfigured: false,
         aadhaarOcrConfigured: false,
         aadhaarMobileConfigured: false,
@@ -625,8 +623,6 @@ test('[api] full email OTP round trip — the code exists ONLY in the inbox, nev
       aadhaarMobile: false,
       registry: false,
       registration: {
-        smsConfigured: false,
-        whatsappConfigured: false,
         emailConfigured: true,
         aadhaarOcrConfigured: false,
         aadhaarMobileConfigured: false,
