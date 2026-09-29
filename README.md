@@ -2,7 +2,16 @@
 
 [![CI](https://github.com/techwithjainparam/midnight-moonshot/actions/workflows/ci.yml/badge.svg)](https://github.com/techwithjainparam/midnight-moonshot/actions/workflows/ci.yml)
 
-Privacy-first dApp built on Midnight, evolving from a Compact smart contract to a production-ready Web3 application.
+**Live MVP on Midnight Preprod.** A privacy-first property eligibility proof, built as a Compact smart contract with a production React frontend and a Node verification backend.
+
+| | |
+| --- | --- |
+| **Live Demo** | https://priestate.vercel.app |
+| **Preprod Contract** | `fe251d3c8c26ccd56255a636c205c6b804489dbbaf41ddf316244ceb7f3159c2` |
+| **Backend API** | https://backend-production-25553.up.railway.app |
+| **CI** | [![CI](https://github.com/techwithjainparam/midnight-moonshot/actions/workflows/ci.yml/badge.svg)](https://github.com/techwithjainparam/midnight-moonshot/actions/workflows/ci.yml) |
+| **Usage Guide** | [docs/USAGE.md](docs/USAGE.md) |
+| **Product X** | [x.com/JPComputersPune](https://x.com/JPComputersPune) |
 
 ## What This Does
 
@@ -18,7 +27,32 @@ propertyValue >= eligibilityThreshold
 
 Only the eligibility result is disclosed publicly on the ledger. The property value stays private forever.
 
-## Status — Level 3
+## The Problem
+
+Property value is sensitive: it drives taxation, pricing, and eligibility for subsidies and housing schemes. Today, proving *"my property is worth enough to qualify"* requires **disclosing the value** to a registrar, a lender, or a government portal.
+
+That disclosure is irreversible. A public or semi-public valuation leaks a citizen's wealth, invites fraud and targeted scams, and is recorded in systems the citizen cannot correct.
+
+Zero-knowledge proofs remove that trade-off: a citizen can prove a property clears a threshold **without anyone learning the number**.
+
+## Users
+
+| User | Need |
+| --- | --- |
+| **Property owner / citizen** | Prove eligibility for a scheme, loan, or subsidy without revealing their property's market value. |
+| **Government scheme officer** | Verify that an applicant *meets the published threshold* — and nothing more — without soliciting sensitive financial data. |
+| **Registrar / reviewer** | Review an on-chain registration lifecycle (`PENDING → APPROVED/REJECTED`) backed by a real cryptographic officer authorization. |
+
+## Why Midnight
+
+PRIESTATE needs a blockchain where the *computation itself* is private, not just the storage.
+
+* **Compact** — a purpose-built language for ZK circuits where a private witness (`propertyValue`) is checked against a public sealed value (`eligibilityThreshold`), disclosing only a Boolean. This is exactly the shape of the problem; on a general-purpose chain this would be hand-rolled cryptography.
+* **Sealed public state** — `eligibilityThreshold` and the designated `officer` are sealed once at deployment, so the rules of eligibility cannot be quietly changed after the fact.
+* **Witness-based privacy model** — private inputs never enter public state at all, rather than being encrypted-at-rest and trusted to a server.
+* **The government registry stays off-chain and authoritative** — the ledger records *whether* a privacy-preserving claim holds and *who* authorized it. Midnight does not attempt to replace land records; it records verifiable facts about them.
+
+## Status — Level 4 (MVP Live)
 
 Classification used throughout this section:
 
@@ -37,13 +71,15 @@ Classification used throughout this section:
 | Registration liveness (68-point face landmarks + active challenges) | REAL (real face-api landmark inference, blind challenges; not depth/replay-proof) |
 | Live location | REAL (browser geolocation + verification) |
 | Biometric enrollment + login face matching | REAL (real face embedding extraction, encrypted server-side reference store, server-authoritative matched/mismatch verdict) |
+| Email OTP (real SMTP transport, hashed single-use codes) | REAL — code path live; **Railway blocks outbound SMTP:587, so live delivery is not yet working** |
 | Google factor | PROVIDER-READY (needs live OAuth credentials) |
-| SMS / WhatsApp OTP factors | PROVIDER-READY (needs live gateway credentials) |
+| SMS / WhatsApp OTP factors (**login only** — removed from registration) | PROVIDER-READY (needs live gateway credentials) |
 | Aadhaar / KYC | NOT AVAILABLE / PROVIDER-READY architecture (no UIDAI-authorized provider connected) |
 | Railway backend (verification API) | REAL (deployed, health 200) |
 | Vercel frontend | REAL (deployed, live) |
-| CI/CD (GitHub Actions: compile, typecheck, tests, build) | REAL (green) |
-| Automated tests | REAL (436/436 tests passing) |
+| Preprod contract | REAL (deployed, state confirmed on the public Preprod indexer) |
+| CI/CD (GitHub Actions: compile, typecheck, tests, build) | REAL (green on `main`) |
+| Automated tests | REAL (472/472 tests passing) |
 | Privacy / security model (AES-256-GCM at rest, fail-closed, PII/biometric off-ledger) | REAL |
 
 **Live deployments:**
@@ -52,7 +88,7 @@ Classification used throughout this section:
 
 No Google, SMS, WhatsApp, or Aadhaar/KYC capability is claimed as live; each is labelled PROVIDER-READY or NOT AVAILABLE above because live provider credentials are not configured. Biometric enrollment and login face matching ARE real and bundled (real face-api inference + encrypted server-side reference store).
 
-## Level 3 User Flow
+## User Flow
 
 PRIESTATE follows the Option-A flow: **account creation does NOT require a Midnight wallet** — the wallet is associated after registration.
 
@@ -60,9 +96,9 @@ PRIESTATE follows the Option-A flow: **account creation does NOT require a Midni
 Landing
   │
   ▼
-Register account (wallet-free, 11-step server stepper:
-  personal → Aadhaar doc OCR → email → SMS OTP → WhatsApp OTP →
-  Aadhaar-mobile link → password → photo → liveness → location → finalize)
+Register account (wallet-free, server stepper:
+  personal → Aadhaar doc OCR → email → Aadhaar-mobile link →
+  password → photo → liveness → location → finalize)
   │
   ▼
 Finalize → the CITIZEN CONNECTS their real Midnight wallet to bind it to the
@@ -106,7 +142,19 @@ The **PRIESTATE Compact contract** is deployed on the **Midnight Preprod** netwo
 
 This is the deployed **PRIESTATE Compact** smart contract. The frontend joins this exact address on the Preprod network, and the property eligibility flow runs against this on-chain contract.
 
-### Deployment Proof
+### Verify it yourself
+
+The contract's public state can be read directly from the public Midnight Preprod indexer — no wallet, no private key, no PRIESTATE account required:
+
+```bash
+ADDR=fe251d3c8c26ccd56255a636c205c6b804489dbbaf41ddf316244ceb7f3159c2
+
+curl -s -X POST https://indexer.preprod.midnight.network/api/v4/graphql \
+  -H 'Content-Type: application/json' \
+  -d "{\"query\":\"query(\$address: HexEncoded!){ contractAction(address: \$address){ state } }\",\"variables\":{\"address\":\"$ADDR\"}}"
+```
+
+A live contract returns a `contract-state[v6]` payload (the ledger state: sealed threshold, designated officer, the registration map, and the Boolean `eligibilityResult`). An address that was never deployed returns `null`.
 
 ![PRIESTATE Preprod Deployment Proof](screenshots/priestate-preprod-deployment-proof.png)
 
@@ -178,14 +226,34 @@ npm run verify-server        # verification API on :8787
 ## Run Tests
 
 ```bash
-npm test                     # 436/436 passing (contract, auth, privacy, registry, officer, etc.)
+npm test                     # 472/472 passing (contract, auth, privacy, registry, officer, etc.)
 npm run typecheck            # tsc --noEmit
 npm run build                # typecheck + production build
 ```
 
+## Usage Guide
+
+Full step-by-step instructions — including the property registration workflow, what gets proved, what stays private, registry review, and troubleshooting — are in **[docs/USAGE.md](docs/USAGE.md)**.
+
 ## CI/CD
 
-`.github/workflows/ci.yml` runs on **push to `main`** and **pull requests**: checkout → Node.js 22 → pinned compact toolchain install → `npm run compile` → `npm run copy-circuits` → `npm run typecheck` → `npm test` → `npm run build`. Status: [CI badge](https://github.com/techwithjainparam/midnight-moonshot/actions/workflows/ci.yml).
+`.github/workflows/ci.yml` runs on **push to `main`** and on **pull requests**, and gates the real PRIESTATE build (not a template):
+
+| Step | What it proves |
+| --- | --- |
+| `actions/checkout@v4` | source under test |
+| `actions/setup-node@v4` (**Node 22**, npm cache) | pinned toolchain matches `engines.node >= 22` |
+| `npm ci` | lockfile is installable and reproducible |
+| compact CLI **0.5.1** installer + `compact update 0.31.1` | the Compact toolchain this contract actually needs (it is *not* an npm dependency) |
+| `npm run compile` | `contracts/priestate.compact` compiles to `contracts/managed/priestate` |
+| `npm run copy-circuits` | ZK proving/verifying keys reach `public/` for the browser |
+| `npm run typecheck` | `tsc --noEmit` clean |
+| `npm test` | full suite (**472 tests**) |
+| `npm run build` | production bundle builds |
+
+The compact toolchain is pinned deliberately: CLI `0.5.1` → toolchain `0.31.1` / language `0.23.0`, the pair matched to `@midnight-ntwrk/compact-runtime@0.16.0`. The installer is fetched from a **pinned release tag**, never `releases/latest`.
+
+Status: [CI badge](https://github.com/techwithjainparam/midnight-moonshot/actions/workflows/ci.yml) · [runs](https://github.com/techwithjainparam/midnight-moonshot/actions/workflows/ci.yml)
 
 ## Product Proposal
 
@@ -259,7 +327,7 @@ midnight-moonshot/
 │   ├── browser-manager.ts         # BrowserPriestateManager
 │   ├── contract-address.ts        # contract address resolution
 │   └── in-memory-private-state-provider.ts
-├── tests/                         # 436/436 tests passing (compile, wiring, result, privacy, etc.)
+├── tests/                         # 472/472 tests passing (compile, wiring, result, privacy, etc.)
 ├── public/
 │   ├── keys/                      # ZK artifacts (copied by copy-circuits)
 │   └── zkir/
@@ -472,13 +540,29 @@ responsible authority's identity system.
 
 ## Demo Mode
 
-When the verification server is unreachable, the client enters demo mode:
+**There is no email OTP demo mode.** Earlier revisions of this README documented
+a fixed demo code (`123456`); that bypass was **removed** in commit `b198589`
+and no longer exists in the code. It is not reinstated anywhere in this build.
 
-* **Email OTP**: accepts the fixed demo code `123456` (no email sent)
-* **Aadhaar**: shows "Aadhaar-linked mobile verification is not available in this demo"
-* **Demo banner**: "Demo Mode — No email was sent. Use verification code **123456**"
+What happens instead when a verification step cannot be completed:
 
-Demo mode is clearly labeled in the UI. No real Aadhaar data is collected or transmitted.
+| Step | Behaviour when unavailable |
+| --- | --- |
+| **Email OTP** | The request fails with an explicit error. The code is never fabricated, and the step does not silently pass. |
+| **Aadhaar KYC** | Reports "Aadhaar-linked mobile verification is not available" rather than faking a link. |
+| **Liveness / biometrics** | Reports unavailable; motion is never treated as a verified face match. |
+
+The application fails closed. There is no path where an unavailable capability
+produces a successful verification.
+
+### Client-side demo officer role (UX only)
+
+`VITE_DEMO_OFFICER_ADDRESSES` and the "Simulate Officer Sign-In (DEMO)" control
+(`src/auth/roles.ts`, `src/components/guards/RequireOfficer.tsx`) affect **only
+what the UI shows**. They grant no server capability: the registry API requires
+`REGISTRY_OFFICER_API_TOKEN`, and with that unset the server returns
+`unavailable`. On-chain `approve`/`reject` is enforced independently by the
+Compact circuit. Treat this as a UX convenience, not a security boundary.
 
 ## Record model — append-only history
 
@@ -515,15 +599,18 @@ decisions in the portal append new events rather than rewriting state.
 
 ## Contact & identity verification
 
-The Level 3 account flow is: **Register account (wallet-free) → Finalize →
+The account flow is: **Register account (wallet-free) → Finalize →
 Connect wallet to associate → Biometric enrollment → Login → verified
 profile → Register / Dashboard** (officers bypass the contact gate). The full
 registration stepper (`/register-account`) is served by `server/registration/`
-and runs: personal + Aadhaar → Aadhaar document OCR → email → SMS OTP →
-WhatsApp OTP → Aadhaar-mobile link → password → photo → liveness → location →
-finalize. Every decision (verified booleans, hashes, evidence acceptance) is
-server-authoritative; identity/KYC and liveness verification run against a
-small server-side API (`server/`), never in the browser:
+and runs: personal + Aadhaar → Aadhaar document OCR → **email verification** →
+Aadhaar-mobile link → password → photo → liveness → location → finalize.
+(SMS and WhatsApp verification were removed from the registration flow; email
+verification is the registration gate. SMS/WhatsApp factors remain available
+for *login* only, and are provider-ready.) Every decision (verified booleans,
+hashes, evidence acceptance) is server-authoritative; identity/KYC and liveness
+verification run against a small server-side API (`server/`), never in the
+browser:
 
 * **Email** — the API generates a 6-digit OTP, stores only an HMAC of it, and
   delivers it to the user's inbox via authenticated SMTP. Codes expire, are
@@ -621,3 +708,61 @@ starting it. Secret values are never echoed or logged.
 All secrets live in plain (non-`VITE_*`) environment variables read only by
 the Node process. The only frontend-visible variable is
 `VITE_VERIFICATION_API_URL` — a public URL, not a credential.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| Proof generation hangs | Local proof server not running | `npm run proof-server:start` (Docker Desktop must be running) |
+| "Connect your wallet" never resolves | No DApp Connector v4.x wallet installed | Install Lace or 1AM for Preprod |
+| `npm run compile` fails | `compact` toolchain missing or unpinned | Install CLI 0.5.1, then `compact update 0.31.1` (see CI workflow) |
+| Verification server rejects credentials | `.env` not sourced into the shell | `set -a; source .env; set +a` before `npm run verify-server` |
+| Email OTP is not received | Hosted platform blocks outbound SMTP | On Railway, SMTP egress is blocked; email delivery requires an HTTPS email API provider |
+| Property shows "NO ON-CHAIN VERIFICATION THIS SESSION" | Eligibility result read from a different session | Re-run the verification; the verdict is read from the on-chain ledger, never cached client-side |
+| `452` / CORS errors from the browser | Backend URL not in the CSP | Add the backend origin to `connect-src` in `vercel.json` |
+
+## Product X Profile
+
+**Official product profile:** **https://x.com/JPComputersPune**
+
+> Launch copy prepared for that profile. The account itself is maintained
+> separately and is not created or modified by this repository.
+
+**Handle:** [@JPComputersPune](https://x.com/JPComputersPune)
+
+**Bio:**
+> Prove your property qualifies — without revealing its value.
+> Privacy-first eligibility proofs built on Midnight + Compact. Live on Preprod.
+
+**Profile description:**
+> PRIESTATE is a privacy-first property eligibility proof on Midnight.
+> A citizen proves `propertyValue >= eligibilityThreshold` inside a Compact
+> zero-knowledge circuit. Only the Boolean result is published on-chain.
+> The property value, the applicant key, and the officer key never leave the client.
+
+**Website / demo link:** https://priestate.vercel.app
+**Contract (Preprod):** `fe251d3c8c26ccd56255a636c205c6b804489dbbaf41ddf316244ceb7f3159c2`
+**Repository:** https://github.com/techwithjainparam/midnight-moonshot
+**Product X profile:** https://x.com/JPComputersPune
+
+**Launch post 1 — the problem**
+> Proving your property is worth enough shouldn't cost you your privacy.
+> To qualify for a scheme today, you hand your exact valuation to a portal — permanently.
+> We built the opposite: prove you clear the threshold, reveal nothing.
+> 🧵👇
+
+**Launch post 2 — how it works**
+> How PRIESTATE works, in one proof.
+> The property value goes in as a *private witness* to a Compact circuit on Midnight.
+> The circuit checks `value >= threshold` and publishes only `true`/`false`.
+> The number is never written to the ledger. It can't be — it isn't part of the public state.
+> Live on Midnight Preprod: priestate.vercel.app
+
+**Launch post 3 — the MVP**
+> PRIESTATE is live on Midnight Preprod.
+> ✅ Wallet-gated property registration, on-chain `PENDING → APPROVED/REJECTED`
+> ✅ Real ZK eligibility proof — only the verdict is public
+> ✅ Server-authoritative accounts, sessions and review
+> 🔒 PII, biometrics and passwords stay off-ledger, encrypted at rest
+> Try it → priestate.vercel.app
+> Built for the Midnight Builder Challenge.

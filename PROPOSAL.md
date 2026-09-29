@@ -281,7 +281,7 @@ What currently exists:
 
 - **Deployed frontend** — live at https://priestate.vercel.app (Vercel; reachable).
 - **Midnight Preprod deployment** — contract address `fe251d3c8c26ccd56255a636c205c6b804489dbbaf41ddf316244ceb7f3159c2` recorded in `.midnight-state.json` with a deployment-proof screenshot.
-- **Automated tests** — currently **436/436 tests passing** covering account, auth, privacy, liveness, face-verification, registration, registry, and officer paths (verified via `npm test`).
+- **Automated tests** — currently **472/472 tests passing** covering account, auth, privacy, liveness, face-verification, registration, registry, and officer paths (verified via `npm test`).
 - **CI pipeline** — `.github/workflows/ci.yml` runs compact compile, copy-circuits, typecheck, tests, and a production build on push/PR; README shows a CI badge.
 - **Demo video (Level 2)** — https://youtu.be/UQwleyyFHqQ.
 
